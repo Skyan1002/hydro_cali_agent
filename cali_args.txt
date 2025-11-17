@@ -1,0 +1,16 @@
+--basic_data_path=/scratch/skyan/data_cali/basic
+--default_param_dir=/scratch/skyan/data_cali/default_param
+--precip_path=/scratch/skyan/data_cali/mrmsGauge/mrmsGauge_18_19
+--precip_name=GaugeCorr_QPE_01H_00.00_YYYYMMDD-HH0000.grib2.tif
+--pet_path=/scratch/skyan/data_cali/PET_tif
+--pet_name=etYYYYMMDD.tif
+--gauge_outdir=/scratch/skyan/data_cali/gauge_18_19
+--results_outdir=/scratch/skyan/data_cali/results
+--cali_set_dir=/scratch/skyan/data_cali/cali_set
+--cali_tag=2018
+--time_begin=201801010000
+--time_end=201812312300
+--time_step=1h
+--n_candidates=8
+--n_peaks=3
+--max_rounds=20
