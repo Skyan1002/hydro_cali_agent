@@ -30,8 +30,8 @@ cd ..
 
 # 4) Create your Python environment and install dependencies
 python -m venv .venv  # or conda create -n hydro-cali python=3.10
-source .venv/bin/activate
-pip install -r requirements.txt
+source .venv/bin/activate # or conda activate hydro-cali
+pip install -r requirements.txt # or just conda install -c conda-forge pandas numpy matplotlib requests dataretrieval openai python-dotenv
 
 # 5) Provide API keys to the agents
 cat <<'ENV' > .env
