@@ -2,13 +2,16 @@
 """Run 2019 test simulations using metric-specific best parameters."""
 
 from __future__ import annotations
-
 import argparse
 import json
 import re
+import shutil
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
+
+from hydro_cali_main import ensure_abs_path, run_usgs_downloader
 
 from hydrocalib.ef5_runner import run_ef5
 from hydrocalib.metrics import read_metrics_for_period
@@ -37,6 +40,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--time_step", default="1h", help="EF5 TIMESTEP override")
     parser.add_argument("--eval_start", default="2019-01-01 00:00", help="Start of evaluation window")
     parser.add_argument("--eval_end", default="2019-12-31 23:00", help="End of evaluation window")
+    parser.add_argument("--gauge_outdir", default="./data_cali/gauge_18_19", help="Directory to store downloaded USGS CSV")
+    parser.add_argument("--python_exec", default=sys.executable, help="Python executable for the USGS downloader")
+    parser.add_argument("--usgs_script_path", default="./usgs_gauge_download.py", help="Path to the USGS download script")
+    parser.add_argument("--skip_download", action="store_true", help="Skip downloading USGS observations")
     parser.add_argument("--ef5_executable", default="./EF5/bin/ef5", help="Path to EF5 executable")
     return parser.parse_args()
 
@@ -71,7 +78,8 @@ def render_control(template: str,
                    output_dir: Path,
                    time_begin: str,
                    time_end: str,
-                   time_step: str) -> str:
+                   time_step: str,
+                   obs_path: Optional[str] = None) -> str:
     content = template
     for key, value in params.items():
         pattern = re.compile(rf"{key}=\s*[0-9.eE+-]+")
@@ -83,6 +91,9 @@ def render_control(template: str,
         "TIMESTEP": time_step,
     }.items():
         content = _replace_scalar(content, name, val)
+
+    if obs_path:
+        content = _replace_scalar(content, "OBS", obs_path)
 
     output_str = str(output_dir)
     if CONTROL_PATTERN.search(content):
@@ -99,6 +110,53 @@ def write_control(content: str, site_dir: Path, results_tag: str, subfolder: str
     control_path = (out_dir / "control.txt").resolve()
     control_path.write_text(content)
     return control_path
+
+
+def find_obs_path(template: str) -> Optional[Path]:
+    match = re.search(r"^OBS\s*=\s*(.+)$", template, flags=re.MULTILINE)
+    if match:
+        return Path(match.group(1).strip())
+    return None
+
+
+def resolve_obs_csv_path(template: str, site_dir: Path, gauge_outdir: Path, site_num: str) -> Path:
+    from_template = find_obs_path(template)
+    if from_template:
+        obs_path = from_template.expanduser()
+        if not obs_path.is_absolute():
+            obs_path = (site_dir / obs_path).resolve()
+        return obs_path
+    return (gauge_outdir / f"USGS_{site_num}_1h_UTC.csv").resolve()
+
+
+def ensure_gauge_data(site_num: str,
+                      obs_csv_path: Path,
+                      time_begin: str,
+                      time_end: str,
+                      time_step: str,
+                      python_exec: str,
+                      usgs_script_path: str,
+                      skip_download: bool) -> None:
+    if skip_download:
+        print("[INFO] Skipping gauge download for test run.")
+        return
+
+    out_dir = obs_csv_path.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[INFO] Downloading USGS data to {out_dir} …")
+    run_usgs_downloader(
+        python_exec=python_exec,
+        script_path=usgs_script_path,
+        site_no=site_num,
+        time_begin=time_begin,
+        time_end=time_end,
+        time_step=time_step,
+        outdir=str(out_dir),
+    )
+
+    downloaded = out_dir / f"USGS_{site_num}_1h_UTC.csv"
+    if downloaded.exists() and downloaded.resolve() != obs_csv_path.resolve():
+        shutil.copy2(downloaded, obs_csv_path)
 
 
 def locate_csv(output_dir: Path, gauge_num: str) -> Path:
@@ -120,13 +178,14 @@ def run_test_for_folder(site_dir: Path,
                         time_end: str,
                         time_step: str,
                         results_tag: str,
+                        obs_csv_path: str,
                         ef5_executable: str,
                         eval_bounds: Tuple[str, str]) -> Dict[str, object]:
     output_dir = (site_dir / "results" / results_tag / subfolder)
     output_dir.mkdir(parents=True, exist_ok=True)
     output_dir = output_dir.resolve()
 
-    control_text = render_control(template, params, output_dir, time_begin, time_end, time_step)
+    control_text = render_control(template, params, output_dir, time_begin, time_end, time_step, obs_path=obs_csv_path)
     control_path = write_control(control_text, site_dir, results_tag, subfolder)
 
     log_path = (output_dir / "logs" / "ef5.log")
@@ -150,6 +209,19 @@ def main() -> None:
     site_dir = (Path(args.cali_set_dir).expanduser().resolve() / f"{args.site_num}_{args.cali_tag}")
     template = load_template(site_dir)
 
+    gauge_outdir = Path(ensure_abs_path(args.gauge_outdir))
+    obs_csv_path = resolve_obs_csv_path(template, site_dir, gauge_outdir, args.site_num)
+    ensure_gauge_data(
+        site_num=args.site_num,
+        obs_csv_path=obs_csv_path,
+        time_begin=args.time_begin,
+        time_end=args.time_end,
+        time_step=args.time_step,
+        python_exec=args.python_exec,
+        usgs_script_path=ensure_abs_path(args.usgs_script_path),
+        skip_download=args.skip_download,
+    )
+
     results_root = (site_dir / "results" / args.results_tag).resolve()
     results_root.mkdir(parents=True, exist_ok=True)
 
@@ -170,6 +242,7 @@ def main() -> None:
                 args.time_end,
                 args.time_step,
                 args.results_tag,
+                str(obs_csv_path),
                 args.ef5_executable,
                 (args.eval_start, args.eval_end),
             )
