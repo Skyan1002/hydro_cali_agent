@@ -68,7 +68,7 @@ class TwoStageCalibrationManager:
         print("[Init] Running baseline simulation…")
         baseline_result = self.runner.run(self.current_params, round_index=0, candidate_index=0)
         outcome = self._process_result(baseline_result)
-        self._generate_plots(outcome)
+        self._ensure_plots(outcome)
         self.best_outcome = outcome
         improved = self.history.update_best(
             aggregate_metrics=outcome.aggregate_metrics,
@@ -77,9 +77,8 @@ class TwoStageCalibrationManager:
             round_index=0,
             candidate_index=0,
         )
+        self._update_metric_bests([outcome], round_index=0)
         self.history.save()
-        if improved:
-            self._publish_best(outcome)
         agg = outcome.aggregate_metrics
         full = outcome.full_metrics
         print(
@@ -99,17 +98,26 @@ class TwoStageCalibrationManager:
         full_metrics = read_metrics_from_csv(result.csv_path)
         return CandidateOutcome(result, result.params, windows, event_metrics, aggregate, full_metrics)
 
-    def _generate_plots(self, outcome: CandidateOutcome) -> None:
-        outcome.hydrograph_path = plot_hydrograph_with_precipitation(outcome.simulation.csv_path, show=False)
-        peaks_dir = Path(outcome.simulation.output_dir) / "peaks"
-        outcome.event_figures = plot_event_windows(
-            outcome.simulation.csv_path,
-            outcome.windows,
-            out_dir=str(peaks_dir),
-        )[:self.include_max_event_images]
+    def _ensure_plots(self, outcome: CandidateOutcome) -> None:
+        hydrograph_missing = not outcome.hydrograph_path or not Path(outcome.hydrograph_path).exists()
+        if hydrograph_missing:
+            outcome.hydrograph_path = plot_hydrograph_with_precipitation(outcome.simulation.csv_path, show=False)
 
-    def _publish_best(self, outcome: CandidateOutcome) -> None:
-        best_dir = Path(self.runner.simu_folder) / "results" / "best"
+        valid_figures = [fig for fig in outcome.event_figures if Path(fig).exists()]
+        if len(valid_figures) < self.include_max_event_images:
+            peaks_dir = Path(outcome.simulation.output_dir) / "peaks"
+            valid_figures = plot_event_windows(
+                outcome.simulation.csv_path,
+                outcome.windows,
+                out_dir=str(peaks_dir),
+            )[:self.include_max_event_images]
+        outcome.event_figures = valid_figures
+
+    def _publish_best(self,
+                      outcome: CandidateOutcome,
+                      subfolder: str,
+                      metadata: Optional[Dict[str, Any]] = None) -> None:
+        best_dir = Path(self.runner.simu_folder) / "results" / subfolder
         if best_dir.exists():
             shutil.rmtree(best_dir)
         best_dir.mkdir(parents=True, exist_ok=True)
@@ -121,14 +129,33 @@ class TwoStageCalibrationManager:
             fig_path = Path(fig)
             if fig_path.exists():
                 shutil.copy2(fig_path, events_dir / fig_path.name)
-        summary = {
+        summary: Dict[str, Any] = {
             "round_index": outcome.simulation.round_index,
             "candidate_index": outcome.simulation.candidate_index,
             "aggregate_metrics": outcome.aggregate_metrics,
             "full_metrics": outcome.full_metrics,
             "params": outcome.params.values.copy(),
         }
+        if metadata:
+            summary.update(metadata)
         (best_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2))
+
+    def _summarize_outcome(self,
+                           outcome: CandidateOutcome,
+                           *,
+                           criterion: str,
+                           value: float) -> Dict[str, Any]:
+        return {
+            "round_index": outcome.simulation.round_index,
+            "candidate_index": outcome.simulation.candidate_index,
+            "criterion": criterion,
+            "criterion_value": value,
+            "aggregate_metrics": outcome.aggregate_metrics,
+            "full_metrics": outcome.full_metrics,
+            "params": outcome.params.values.copy(),
+            "hydrograph": outcome.hydrograph_path,
+            "event_figures": outcome.event_figures[: self.include_max_event_images],
+        }
 
     def _history_summary(self, last_k: int = 3) -> str:
         if not self.history.rounds:
@@ -189,6 +216,34 @@ class TwoStageCalibrationManager:
         if np.isfinite(peak_ratio) and peak_ratio > 0:
             score -= 0.1 * abs(math.log(peak_ratio))
         return score
+
+    def _collect_round_bests(self, outcomes: Sequence[CandidateOutcome]) -> Dict[str, Dict[str, Any]]:
+        metric_extractors = {
+            "score": lambda outcome: self._candidate_score(outcome.aggregate_metrics, outcome.full_metrics),
+            "full_nse": lambda outcome: outcome.full_metrics.get("NSE", float("nan")),
+            "full_cc": lambda outcome: outcome.full_metrics.get("CC", float("nan")),
+            "full_kge": lambda outcome: outcome.full_metrics.get("KGE", float("nan")),
+        }
+        round_bests: Dict[str, Dict[str, Any]] = {}
+        for key, extractor in metric_extractors.items():
+            best_value = float("-inf")
+            best_outcome: Optional[CandidateOutcome] = None
+            for outcome in outcomes:
+                value = extractor(outcome)
+                if not np.isfinite(value):
+                    continue
+                if best_outcome is None or value > best_value:
+                    best_value = value
+                    best_outcome = outcome
+            if best_outcome is None:
+                continue
+            self._ensure_plots(best_outcome)
+            round_bests[key] = self._summarize_outcome(
+                best_outcome,
+                criterion=key,
+                value=best_value,
+            )
+        return round_bests
 
     def _select_best(self, outcomes: List[CandidateOutcome]) -> int:
         best_idx = -1
@@ -262,7 +317,7 @@ class TwoStageCalibrationManager:
 
             best_idx = self._select_best(outcomes)
             best_outcome = outcomes[best_idx]
-            self._generate_plots(best_outcome)
+            self._ensure_plots(best_outcome)
             self.best_outcome = best_outcome
             self.current_params = best_outcome.params.copy()
             self.current_params.to_object(self.args_obj)
@@ -277,6 +332,7 @@ class TwoStageCalibrationManager:
                 )
                 for outcome in outcomes
             ]
+            round_metric_bests = self._collect_round_bests(outcomes)
             round_record = RoundRecord(
                 round_index=r,
                 proposals=proposals,
@@ -286,6 +342,7 @@ class TwoStageCalibrationManager:
                 rationale=eval_meta.get("rationale", ""),
                 risk=eval_meta.get("risk", ""),
                 focus=eval_meta.get("focus", ""),
+                best_candidates_by_metric=round_metric_bests,
             )
             self.history.rounds.append(round_record)
             improved = self.history.update_best(
@@ -295,10 +352,10 @@ class TwoStageCalibrationManager:
                 round_index=r,
                 candidate_index=best_outcome.simulation.candidate_index,
             )
+            self._update_metric_bests(outcomes, round_index=r)
             self.history.save()
             if improved:
                 print(f"[Round {r}] New global best found (candidate {best_outcome.simulation.candidate_index}).")
-                self._publish_best(best_outcome)
 
             agg = best_outcome.aggregate_metrics
             full = best_outcome.full_metrics
@@ -314,6 +371,50 @@ class TwoStageCalibrationManager:
 
             if r >= IMPROVE_PATIENCE:
                 break
+
+    def _update_metric_bests(self,
+                             outcomes: Sequence[CandidateOutcome],
+                             round_index: int) -> None:
+        for outcome in outcomes:
+            agg = outcome.aggregate_metrics
+            full = outcome.full_metrics
+            score = self._candidate_score(agg, full)
+            if self.history.update_best_metric(
+                key="score",
+                value=score,
+                aggregate_metrics=agg,
+                full_metrics=full,
+                params=outcome.params.values.copy(),
+                round_index=round_index,
+                candidate_index=outcome.simulation.candidate_index,
+            ):
+                self._ensure_plots(outcome)
+                self._publish_best(
+                    outcome,
+                    subfolder="best",
+                    metadata={"criterion": "score", "criterion_value": score},
+                )
+
+            for metric in ("NSE", "CC", "KGE"):
+                value = full.get(metric, float("nan"))
+                if not np.isfinite(value):
+                    continue
+                key = f"full_{metric.lower()}"
+                if self.history.update_best_metric(
+                    key=key,
+                    value=value,
+                    aggregate_metrics=agg,
+                    full_metrics=full,
+                    params=outcome.params.values.copy(),
+                    round_index=round_index,
+                    candidate_index=outcome.simulation.candidate_index,
+                ):
+                    self._ensure_plots(outcome)
+                    self._publish_best(
+                        outcome,
+                        subfolder=f"best_{key}",
+                        metadata={"criterion": key, "criterion_value": value},
+                    )
 
 
 __all__ = ["TwoStageCalibrationManager", "CandidateOutcome"]

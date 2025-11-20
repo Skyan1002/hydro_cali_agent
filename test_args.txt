@@ -1,0 +1,12 @@
+--cali_set_dir=data_cali/cali_set
+--cali_tag=2018
+--results_tag=test_2019
+--time_begin=201801010000
+--time_end=201912312300
+--time_step=1h
+--eval_start=2019-01-01 00:00
+--eval_end=2019-12-31 23:00
+--gauge_outdir=./data_cali/gauge_18_19
+--usgs_script_path=./usgs_gauge_download.py
+--python_exec=python
+--ef5_executable=./EF5/bin/ef5

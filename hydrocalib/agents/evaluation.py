@@ -19,6 +19,8 @@ EVALUATION_SYSTEM_PROMPT = (
     " list items containing `id`, `origin` (which proposal inspired it), `rationale`, and `updates` mapping parameters to numbers"
     " or operation dictionaries. Encourage markedly different strategies (timing focus, peak shaping, baseflow control, etc.)."
     "\nAll updates must stay within hydrologic bounds; TH, IWU, and ISU are frozen and must remain unchanged."
+    "\nGive lower weight to event peaks from the earliest months because warm-up issues make them less reliable; focus more on"
+    " later-season peaks when ranking candidates."
     "\n" + EF5_PARAMETER_GUIDE
 )
 
