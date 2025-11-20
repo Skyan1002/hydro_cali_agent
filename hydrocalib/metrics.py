@@ -81,6 +81,67 @@ def read_metrics_from_csv(csv_path: str,
     }
 
 
+def read_metrics_for_period(csv_path: str,
+                            start: Any,
+                            end: Any,
+                            time_col: str = "Time",
+                            sim_col: str = "Discharge(m^3 s^-1)",
+                            obs_col: str = "Observed(m^3 s^-1)") -> Dict[str, Any]:
+    """Compute NSE/CC/KGE and peak stats over a bounded time window."""
+    df = pd.read_csv(csv_path)
+    df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
+
+    start_ts = pd.to_datetime(start)
+    end_ts = pd.to_datetime(end)
+    df = df[(df[time_col] >= start_ts) & (df[time_col] <= end_ts)].copy()
+
+    if df.empty:
+        return {
+            "NSE": float("nan"),
+            "CC": float("nan"),
+            "KGE": float("nan"),
+            "sim_peak": float("nan"),
+            "obs_peak": float("nan"),
+            "peak_ratio": float("nan"),
+            "lag_hours_sim_minus_obs": float("nan"),
+        }
+
+    s = df[sim_col].astype(float)
+    o = df[obs_col].astype(float)
+
+    valid = ~(s.isna() | o.isna())
+    s = s[valid]
+    o = o[valid]
+    t = df.loc[valid, time_col]
+
+    den = np.sum((o - np.mean(o)) ** 2)
+    nse = float(1.0 - np.sum((o - s) ** 2) / den) if den > 0 else float("nan")
+    cc = safe_corrcoef(s.to_numpy(), o.to_numpy())
+    kge_val = kge(s.to_numpy(), o.to_numpy())
+
+    s_peak = float(np.max(s)) if len(s) else float("nan")
+    o_peak = float(np.max(o)) if len(o) else float("nan")
+    peak_ratio = float(s_peak / o_peak) if (o_peak and o_peak > 0) else float("inf")
+
+    s_tpeak = t.iloc[int(np.argmax(s.to_numpy()))] if len(s) else pd.NaT
+    o_tpeak = t.iloc[int(np.argmax(o.to_numpy()))] if len(o) else pd.NaT
+    lag_hours = (
+        float((s_tpeak - o_tpeak).total_seconds() / 3600.0)
+        if (s_tpeak is not pd.NaT and o_tpeak is not pd.NaT)
+        else float("nan")
+    )
+
+    return {
+        "NSE": nse,
+        "CC": cc,
+        "KGE": kge_val,
+        "sim_peak": s_peak,
+        "obs_peak": o_peak,
+        "peak_ratio": peak_ratio,
+        "lag_hours_sim_minus_obs": lag_hours,
+    }
+
+
 def _series_window(df: pd.DataFrame,
                    start: pd.Timestamp,
                    end: pd.Timestamp,
@@ -179,4 +240,5 @@ __all__ = [
     "aggregate_event_metrics",
     "kge",
     "safe_corrcoef",
+    "read_metrics_for_period",
 ]
