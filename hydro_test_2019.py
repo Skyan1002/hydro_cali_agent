@@ -222,6 +222,8 @@ def main() -> None:
         skip_download=args.skip_download,
     )
 
+    ef5_executable = ensure_abs_path(args.ef5_executable)
+
     results_root = (site_dir / "results" / args.results_tag).resolve()
     results_root.mkdir(parents=True, exist_ok=True)
 
@@ -243,7 +245,7 @@ def main() -> None:
                 args.time_step,
                 args.results_tag,
                 str(obs_csv_path),
-                args.ef5_executable,
+                ef5_executable,
                 (args.eval_start, args.eval_end),
             )
             futures[future] = subfolder
