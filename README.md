@@ -20,6 +20,11 @@ chmod +x download_data.sh
 
 ./download_data.sh
 
+# OR use docker interactively:
+docker run -it --rm -v $(pwd)/data_cali:/app/data_cali -v $(pwd)/cali_set:/app/cali_set -v $(pwd)/cali_args.txt:/app/cali_args.txt hydro-cali /bin/bash
+
+#If you use docker, skip to #5
+
 # 3) Fetch and build EF5 next to this repo
 git clone https://github.com/Skyan1002/EF5.git
 cd EF5/
@@ -34,9 +39,7 @@ source .venv/bin/activate # or conda activate hydro-cali
 pip install -r requirements.txt # or just conda install -c conda-forge pandas numpy matplotlib requests dataretrieval openai python-dotenv
 
 # 5) Provide API keys to the agents
-cat <<'ENV' > .env
-OPENAI_API_KEY=<YOUR_OPENAI_API_KEY>
-ENV
+echo "OPENAI_API_KEY=<YOUR_OPENAI_API_KEY>" > .env
 ```
 
 ---
@@ -45,7 +48,7 @@ ENV
 1. Configure `cali_args.txt` with the CLI flags you reuse often (each line contains `--flag value`).
 2. Launch the pipeline for a specific gauge:
    ```bash
-   python hydro_cali_main.py @cali_args.txt --site_num 03284230
+   python3 hydro_cali_main.py @cali_args.txt --site_num 03284230
    ```
 3. Check `cali_set/<site>_<tag>/results/cali_*/cand_*/` for EF5 outputs and `history_round_*.json` for candidate evolution.
 
