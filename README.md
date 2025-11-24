@@ -25,18 +25,18 @@ docker run -it --rm -v $(pwd)/data_cali:/app/data_cali -v $(pwd)/cali_set:/app/c
 
 #If you use docker, skip to #5
 
-# 3) Fetch and build EF5 next to this repo
+# 3) Create your Python environment and install dependencies (Conda)
+conda create -n hydro-cali python=3.10
+conda activate hydro-cali
+conda install -c conda-forge pandas numpy matplotlib requests dataretrieval openai python-dotenv # or pip install -r requirements.txt
+
+# 4) Fetch and build EF5 next to this repo
 git clone https://github.com/Skyan1002/EF5.git
 cd EF5/
 autoreconf --force --install
 ./configure
 make
 cd ..
-
-# 4) Create your Python environment and install dependencies
-python -m venv .venv  # or conda create -n hydro-cali python=3.10
-source .venv/bin/activate # or conda activate hydro-cali
-pip install -r requirements.txt # or just conda install -c conda-forge pandas numpy matplotlib requests dataretrieval openai python-dotenv
 
 # 5) Provide API keys to the agents
 echo "OPENAI_API_KEY=<YOUR_OPENAI_API_KEY>" > .env
@@ -108,4 +108,3 @@ With these pieces, you can trace every calibration round: from `hydro_cali_main.
 | `usgs_gauge_download.py` | Utility to pull hourly discharge series from USGS NWIS. |
 | `requirements.txt` | Python dependency lock-in for both CLI and agent subsystems. |
 
-Happy calibrating!
