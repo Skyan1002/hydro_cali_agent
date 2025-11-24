@@ -48,7 +48,7 @@ echo "OPENAI_API_KEY=<YOUR_OPENAI_API_KEY>" > .env
 1. Configure `cali_args.txt` with the CLI flags you reuse often (each line contains `--flag value`).
 2. Launch the pipeline for a specific gauge:
    ```bash
-   python3 hydro_cali_main.py @cali_args.txt --site_num 02338660
+   python3 hydro_cali_main.py @cali_args.txt --site_num 03302000
    ```
 3. Check `cali_set/<site>_<tag>/results/cali_*/cand_*/` for EF5 outputs and `history_round_*.json` for candidate evolution.
 
