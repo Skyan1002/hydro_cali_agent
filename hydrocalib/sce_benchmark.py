@@ -336,6 +336,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--alpha0", type=float, default=0.0)
 
     parser.add_argument("--n_peaks", type=int, default=3)
+
+    # Compatibility flags from other calibration drivers; accepted and ignored so
+    # "@cali_args.txt" files can be reused without modification.
+    parser.add_argument("--n_candidates", type=int, default=8,
+                        help="(compat) number of candidates per round from other drivers")
+    parser.add_argument("--max_rounds", type=int, default=20,
+                        help="(compat) maximum rounds from other drivers")
     parser.add_argument("--sce-criterion", dest="sce_criterion", default="NSE", choices=["NSE", "KGE", "CC"],
                         help="Metric used to rank candidates")
     parser.add_argument("--sce-complexes", dest="sce_complexes", type=int, default=5)
@@ -409,9 +416,11 @@ def run_cli(args: argparse.Namespace) -> Path:
     return history_path
 
 
-def main() -> None:
+def main(argv: Optional[Sequence[str]] = None) -> None:
     parser = build_parser()
-    args = parser.parse_args()
+    args, unknown = parser.parse_known_args(argv)
+    if unknown:
+        print(f"Ignoring unrecognized arguments: {unknown}")
     history_path = run_cli(args)
     print(f"SCE-UA benchmark complete. History saved to {history_path}")
 
