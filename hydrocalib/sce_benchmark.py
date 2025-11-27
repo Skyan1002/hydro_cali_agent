@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
+from scipy.stats.qmc import LatinHypercube
 
 from .config import (
     DEFAULT_GAUGE_NUM,
@@ -119,11 +120,17 @@ class SceUaOptimizer:
         self.upper = np.array([PARAM_BOUNDS[n][1] for n in self.var_names], dtype=float)
 
     def _score(self, aggregate_metrics: Dict[str, float], full_metrics: Dict[str, float]) -> float:
-        """Higher score is better."""
+        """Standardize score so that higher is always better."""
         metric = aggregate_metrics.get(self.criterion)
         if metric is None or not math.isfinite(metric):
             metric = full_metrics.get(self.criterion, float("nan"))
-        return float(metric) if math.isfinite(metric) else float("nan")
+
+        val = float(metric) if math.isfinite(metric) else -float("inf")
+
+        if self.criterion in ["RMSE", "MAE", "MSE", "BIAS"]:
+            return -val
+
+        return val
 
     def _build_params(self, vector: np.ndarray) -> ParameterSet:
         values = self.base_params.values.copy()
@@ -161,7 +168,9 @@ class SceUaOptimizer:
         )
 
     def _initial_population(self, population_size: int) -> np.ndarray:
-        pop = self.rng.uniform(self.lower, self.upper, size=(population_size, len(self.var_names)))
+        sampler = LatinHypercube(d=len(self.var_names), seed=self.rng)
+        sample = sampler.random(n=population_size)
+        pop = self.lower + sample * (self.upper - self.lower)
         seed = np.array(
             [
                 self.base_params.values.get(name, (lo + hi) / 2.0)
@@ -262,13 +271,26 @@ class SceUaOptimizer:
                     )
                     if needs_contraction and eval_count < max_evaluations:
                         contracted_point = self._contract_point(best_vector, new_point)
-                        population[replaced_idx] = contracted_point
                         contracted_params = self._build_params(contracted_point)
                         contracted_eval = self._evaluate(
                             contracted_params, iteration=iteration, candidate_index=candidate_index
                         )
                         history.add(contracted_eval)
-                        scores[replaced_idx] = contracted_eval.score
+                        if contracted_eval.score > previous_score:
+                            population[replaced_idx] = contracted_point
+                            scores[replaced_idx] = contracted_eval.score
+                        else:
+                            random_point = self.rng.uniform(self.lower, self.upper)
+                            random_params = self._build_params(random_point)
+                            random_eval = self._evaluate(
+                                random_params, iteration=iteration, candidate_index=candidate_index
+                            )
+                            history.add(random_eval)
+                            population[replaced_idx] = random_point
+                            scores[replaced_idx] = random_eval.score
+                            eval_count += 1
+                            candidate_index += 1
+
                         eval_count += 1
                         candidate_index += 1
 
