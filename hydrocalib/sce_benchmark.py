@@ -5,6 +5,7 @@ import argparse
 import json
 import math
 import time
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -395,8 +396,41 @@ def save_history(history: SceHistory, out_path: Path) -> None:
     out_path.write_text(history.to_json())
 
 
+def _prepare_simu_folder(args: argparse.Namespace) -> Path:
+    """Prepare an isolated SCE simulation folder.
+
+    By default we mirror the existing <site>_<tag> folder but append a `_sce`
+    suffix to avoid mixing artifacts with other calibration runs. If the base
+    folder exists, copy its contents so control.txt and data files are
+    available; otherwise, create the destination and let downstream checks
+    surface any missing inputs.
+    """
+
+    if args.simu_folder:
+        return Path(args.simu_folder)
+
+    base = Path(args.cali_set_dir) / f"{args.site_num}_{args.cali_tag}"
+    sce_folder = base.with_name(f"{base.name}_sce")
+
+    if sce_folder.exists():
+        print(f"Using existing SCE simulation folder: {sce_folder}", flush=True)
+        return sce_folder
+
+    if base.exists():
+        print(f"Creating SCE simulation folder {sce_folder} by copying {base}", flush=True)
+        shutil.copytree(base, sce_folder, dirs_exist_ok=True)
+    else:
+        print(
+            f"Base folder {base} not found; creating empty SCE folder {sce_folder}. "
+            "Ensure control.txt and inputs exist before running.",
+            flush=True,
+        )
+        sce_folder.mkdir(parents=True, exist_ok=True)
+    return sce_folder
+
+
 def run_cli(args: argparse.Namespace) -> Path:
-    simu_folder = args.simu_folder or Path(args.cali_set_dir) / f"{args.site_num}_{args.cali_tag}"
+    simu_folder = _prepare_simu_folder(args)
     runner = SimulationRunner(simu_folder=str(simu_folder), gauge_num=args.gauge_num)
     base_params = ParameterSet.from_object(args)
     rng = np.random.default_rng(args.sce_seed)
@@ -433,6 +467,11 @@ def run_cli(args: argparse.Namespace) -> Path:
             indent=2,
             ensure_ascii=False,
         ),
+        flush=True,
+    )
+    print(
+        f"Working folder: {simu_folder}\n"
+        f"Results will be stored under: {simu_folder / 'results' / args.sce_output_tag}",
         flush=True,
     )
     optimizer = SceUaOptimizer(
