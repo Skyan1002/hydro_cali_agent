@@ -22,7 +22,7 @@ from .config import (
 from .metrics import aggregate_event_metrics, compute_event_metrics, read_metrics_from_csv
 from .parameters import ParameterSet, safe_clip
 from .peak_events import pick_peak_events
-from .simulation import SimulationRunner
+from .simulation import SimulationResult, SimulationRunner, run_simulations_parallel
 
 
 @dataclass
@@ -93,12 +93,13 @@ class SceUaOptimizer:
         n_peaks: int = 3,
         peak_pick_kwargs: Optional[Dict] = None,
         criterion: str = "NSE",
-        complexes: int = 5,
-        complex_size: int = 8,
-        subset_size: Optional[int] = None,
+        complexes: int = 8,
+        complex_size: int = 15,
+        subset_size: Optional[int] = 14,
         evolutions_per_complex: int = 1,
         reflection_coef: float = 1.3,
         contraction_coef: float = 0.6,
+        max_workers: Optional[int] = 8,
         rng: Optional[np.random.Generator] = None,
     ):
         self.runner = runner
@@ -113,6 +114,7 @@ class SceUaOptimizer:
         self.evolutions_per_complex = max(1, evolutions_per_complex)
         self.reflection_coef = reflection_coef
         self.contraction_coef = contraction_coef
+        self.max_workers = max_workers
         self.rng = rng or np.random.default_rng()
 
         self.var_names = [name for name in PARAM_BOUNDS if name not in FROZEN_PARAMETERS]
@@ -167,6 +169,32 @@ class SceUaOptimizer:
             output_dir=simulation.output_dir,
         )
 
+    def _evaluate_outputs(
+        self, simulation: SimulationResult, iteration: int, candidate_index: int
+    ) -> SceEvaluation:
+        start = time.time()
+        windows = pick_peak_events(simulation.csv_path, n=self.n_peaks, **self.peak_pick_kwargs)
+        event_metrics = compute_event_metrics(simulation.csv_path, windows)
+        aggregate = aggregate_event_metrics(event_metrics, top_n=self.n_peaks)
+        full_metrics = read_metrics_from_csv(simulation.csv_path)
+        score = self._score(aggregate, full_metrics)
+        elapsed = time.time() - start
+        print(
+            f"[iter {iteration} cand {candidate_index}] completed (post-run) in {elapsed:.1f}s "
+            f"score={score} output={simulation.output_dir}",
+            flush=True,
+        )
+        return SceEvaluation(
+            iteration=iteration,
+            candidate_index=candidate_index,
+            params=simulation.params.values.copy(),
+            aggregate_metrics=aggregate,
+            full_metrics=full_metrics,
+            score=score,
+            elapsed_seconds=elapsed,
+            output_dir=simulation.output_dir,
+        )
+
     def _initial_population(self, population_size: int) -> np.ndarray:
         sampler = LatinHypercube(d=len(self.var_names), seed=self.rng)
         sample = sampler.random(n=population_size)
@@ -183,17 +211,20 @@ class SceUaOptimizer:
     def run(
         self,
         max_iterations: int = 30,
-        max_evaluations: int = 200,
+        max_evaluations: int = 8000,
         time_limit_seconds: float = 3600.0,
     ) -> SceHistory:
         population_size = max(self.complexes * self.complex_size, len(self.var_names) + 1)
         subset = self.subset_size or min(len(self.var_names) + 1, self.complex_size)
+        subset = min(subset, self.complex_size)
+        subset = max(subset, len(self.var_names) + 1)
         population = self._initial_population(population_size)
         scores = np.full(population_size, np.nan, dtype=float)
 
         history = SceHistory(
             config={
                 "criterion": self.criterion,
+                "param_dimensions": len(self.var_names),
                 "complexes": self.complexes,
                 "complex_size": self.complex_size,
                 "subset_size": subset,
@@ -203,6 +234,7 @@ class SceUaOptimizer:
                 "max_iterations": max_iterations,
                 "max_evaluations": max_evaluations,
                 "time_limit_seconds": time_limit_seconds,
+                "max_workers": self.max_workers,
             }
         )
 
@@ -217,20 +249,41 @@ class SceUaOptimizer:
         )
         print(
             f"Population size={population_size}, complexes={self.complexes}, "
-            f"complex size={self.complex_size}, subset size={subset}",
+            f"complex size={self.complex_size}, subset size={subset}, "
+            f"workers={self.max_workers or 'auto'}",
             flush=True,
         )
 
-        # Evaluate initial population
-        for idx in range(population_size):
-            params = self._build_params(population[idx])
-            evaluation = self._evaluate(params, iteration=0, candidate_index=candidate_index)
-            history.add(evaluation)
-            scores[idx] = evaluation.score
-            eval_count += 1
-            candidate_index += 1
-            if eval_count >= max_evaluations:
-                return history
+        # Evaluate initial population (optionally in parallel)
+        params_list = [self._build_params(population[idx]) for idx in range(population_size)]
+        if self.max_workers and self.max_workers > 1:
+            sims = run_simulations_parallel(
+                self.runner,
+                params_list,
+                round_index=0,
+                max_workers=self.max_workers,
+                start_index=candidate_index,
+            )
+            for sim in sims:
+                evaluation = self._evaluate_outputs(
+                    sim, iteration=0, candidate_index=sim.candidate_index
+                )
+                history.add(evaluation)
+                scores[sim.candidate_index] = evaluation.score
+                eval_count += 1
+                candidate_index = max(candidate_index, sim.candidate_index + 1)
+                if eval_count >= max_evaluations:
+                    return history
+        else:
+            for idx in range(population_size):
+                params = params_list[idx]
+                evaluation = self._evaluate(params, iteration=0, candidate_index=candidate_index)
+                history.add(evaluation)
+                scores[idx] = evaluation.score
+                eval_count += 1
+                candidate_index += 1
+                if eval_count >= max_evaluations:
+                    return history
 
         iteration = 1
         while iteration <= max_iterations and eval_count < max_evaluations:
@@ -394,18 +447,20 @@ def build_parser() -> argparse.ArgumentParser:
                         help="(compat) maximum rounds from other drivers")
     parser.add_argument("--sce-criterion", dest="sce_criterion", default="NSE", choices=["NSE", "KGE", "CC"],
                         help="Metric used to rank candidates")
-    parser.add_argument("--sce-complexes", dest="sce_complexes", type=int, default=5)
-    parser.add_argument("--sce-complex-size", dest="sce_complex_size", type=int, default=8)
-    parser.add_argument("--sce-subset-size", dest="sce_subset_size", type=int, default=None)
+    parser.add_argument("--sce-complexes", dest="sce_complexes", type=int, default=8)
+    parser.add_argument("--sce-complex-size", dest="sce_complex_size", type=int, default=15)
+    parser.add_argument("--sce-subset-size", dest="sce_subset_size", type=int, default=14)
     parser.add_argument("--sce-evolutions", dest="sce_evolutions", type=int, default=1,
                         help="Evolution steps per complex per iteration")
     parser.add_argument("--sce-max-iter", dest="sce_max_iter", type=int, default=30)
-    parser.add_argument("--sce-max-evals", dest="sce_max_evals", type=int, default=200)
+    parser.add_argument("--sce-max-evals", dest="sce_max_evals", type=int, default=8000)
     parser.add_argument("--sce-time-limit", dest="sce_time_limit", type=float, default=3600.0,
                         help="Wall-clock limit in seconds")
     parser.add_argument("--sce-seed", dest="sce_seed", type=int, default=42)
     parser.add_argument("--sce-output-tag", dest="sce_output_tag", default="sce_benchmark",
                         help="Subfolder name under results to store benchmark artifacts")
+    parser.add_argument("--sce-workers", dest="sce_workers", type=int, default=8,
+                        help="Maximum worker threads for EF5 simulations")
 
     parser.add_argument("--simu_folder", default=None,
                         help="Optional explicit simulation folder; defaults to <cali_set_dir>/<site>_<tag>")
@@ -630,6 +685,7 @@ def run_cli(args: argparse.Namespace) -> Path:
                 "time_limit": args.sce_time_limit,
                 "seed": args.sce_seed,
                 "n_peaks": args.n_peaks,
+                "workers": args.sce_workers,
             },
             indent=2,
             ensure_ascii=False,
@@ -651,6 +707,7 @@ def run_cli(args: argparse.Namespace) -> Path:
         complex_size=args.sce_complex_size,
         subset_size=args.sce_subset_size,
         evolutions_per_complex=args.sce_evolutions,
+        max_workers=args.sce_workers,
         rng=rng,
     )
 
