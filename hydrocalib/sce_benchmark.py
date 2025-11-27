@@ -339,8 +339,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gauge_outdir", required=True, help="Folder to save USGS hourly CSV")
     parser.add_argument("--results_outdir", required=True, help="CREST outputs folder")
 
-    parser.add_argument("--time_begin", required=True, help="YYYYMMDDhhmm, e.g., 201801010000")
-    parser.add_argument("--time_end", required=True, help="YYYYMMDDhhmm, e.g., 201812312300")
+    parser.add_argument("--time_begin", default="201801010000",
+                        help="YYYYMMDDhhmm, e.g., 201801010000")
+    parser.add_argument("--time_end", default="201801051230",
+                        help="YYYYMMDDhhmm, e.g., 201812312300")
     parser.add_argument("--time_step", default="1h", help="CREST time step, e.g., 1h")
 
     parser.add_argument("--model", default="CREST")
@@ -535,9 +537,45 @@ def _ensure_control_file(sce_folder: Path, args: argparse.Namespace) -> None:
     print(f"Wrote synthesized control.txt to {control_path}", flush=True)
 
 
+def _apply_time_window_to_control(sce_folder: Path, args: argparse.Namespace) -> None:
+    """Rewrite TIME_BEGIN/TIME_END in control.txt to match CLI arguments."""
+
+    control_path = sce_folder / "control.txt"
+    if not control_path.exists():
+        raise FileNotFoundError(f"control.txt not found in {sce_folder}; cannot set time window")
+
+    original = control_path.read_text().splitlines()
+    updated = []
+    replaced_begin = False
+    replaced_end = False
+
+    for line in original:
+        if line.startswith("TIME_BEGIN="):
+            updated.append(f"TIME_BEGIN={args.time_begin}")
+            replaced_begin = True
+        elif line.startswith("TIME_END="):
+            updated.append(f"TIME_END={args.time_end}")
+            replaced_end = True
+        else:
+            updated.append(line)
+
+    if not replaced_begin:
+        updated.append(f"TIME_BEGIN={args.time_begin}")
+    if not replaced_end:
+        updated.append(f"TIME_END={args.time_end}")
+
+    if updated != original:
+        control_path.write_text("\n".join(updated) + "\n")
+        print(
+            f"Updated control.txt time window -> {args.time_begin} to {args.time_end} at {control_path}",
+            flush=True,
+        )
+
+
 def run_cli(args: argparse.Namespace) -> Path:
     simu_folder = _prepare_simu_folder(args)
     _ensure_control_file(simu_folder, args)
+    _apply_time_window_to_control(simu_folder, args)
     runner = SimulationRunner(simu_folder=str(simu_folder), gauge_num=args.gauge_num)
     base_params = ParameterSet.from_object(args)
     rng = np.random.default_rng(args.sce_seed)
