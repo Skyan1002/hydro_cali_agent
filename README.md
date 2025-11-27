@@ -98,6 +98,17 @@ With these pieces, you can trace every calibration round: from `hydro_cali_main.
 
 ---
 
+### 🔬 Benchmarking with SCE-UA
+Use the standalone SCE-UA runner to generate a like-for-like benchmark against the agent’s calibration loop:
+
+```bash
+python sce_ua_benchmark.py @cali_args.txt --site_num 03284230 --simu_folder ./cali_set/03284230_2018
+```
+
+Progress is written to `<simu_folder>/results/sce_ua/sce_ua_progress.jsonl` and the best run summary to `sce_ua_benchmark_summary.json`, so you can compare iteration counts, wall-clock time, and skill side-by-side.
+
+---
+
 ## 📂 Repository map
 | Path | Description |
 | --- | --- |
