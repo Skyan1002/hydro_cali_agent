@@ -132,6 +132,10 @@ class SceUaOptimizer:
 
     def _evaluate(self, params: ParameterSet, iteration: int, candidate_index: int) -> SceEvaluation:
         start = time.time()
+        print(
+            f"[iter {iteration} cand {candidate_index}] starting simulation with params: {params.values}",
+            flush=True,
+        )
         simulation = self.runner.run(params, round_index=iteration, candidate_index=candidate_index)
         windows = pick_peak_events(simulation.csv_path, n=self.n_peaks, **self.peak_pick_kwargs)
         event_metrics = compute_event_metrics(simulation.csv_path, windows)
@@ -139,6 +143,11 @@ class SceUaOptimizer:
         full_metrics = read_metrics_from_csv(simulation.csv_path)
         score = self._score(aggregate, full_metrics)
         elapsed = time.time() - start
+        print(
+            f"[iter {iteration} cand {candidate_index}] completed in {elapsed:.1f}s "
+            f"score={score} output={simulation.output_dir}",
+            flush=True,
+        )
         return SceEvaluation(
             iteration=iteration,
             candidate_index=candidate_index,
@@ -191,6 +200,17 @@ class SceUaOptimizer:
         candidate_index = 0
         start_time = time.time()
 
+        print(
+            "Starting SCE-UA run with configuration:",
+            json.dumps(history.config, indent=2, ensure_ascii=False),
+            flush=True,
+        )
+        print(
+            f"Population size={population_size}, complexes={self.complexes}, "
+            f"complex size={self.complex_size}, subset size={subset}",
+            flush=True,
+        )
+
         # Evaluate initial population
         for idx in range(population_size):
             params = self._build_params(population[idx])
@@ -207,6 +227,10 @@ class SceUaOptimizer:
             if (time.time() - start_time) >= time_limit_seconds:
                 break
 
+            print(
+                f"=== Iteration {iteration} (evaluations so far: {eval_count}/{max_evaluations}) ===",
+                flush=True,
+            )
             order = np.argsort(-scores)
             population = population[order]
             scores = scores[order]
@@ -376,6 +400,41 @@ def run_cli(args: argparse.Namespace) -> Path:
     runner = SimulationRunner(simu_folder=str(simu_folder), gauge_num=args.gauge_num)
     base_params = ParameterSet.from_object(args)
     rng = np.random.default_rng(args.sce_seed)
+
+    print("=== Resolved benchmark inputs ===", flush=True)
+    print(f"site_num: {args.site_num}", flush=True)
+    print(f"simu_folder: {simu_folder}", flush=True)
+    print(f"gauge_num: {args.gauge_num}", flush=True)
+    print(f"time window: {args.time_begin} -> {args.time_end} (step {args.time_step})", flush=True)
+    print("model/routing:", args.model, args.routing, flush=True)
+    print("paths:", flush=True)
+    print(f"  basic_data_path: {args.basic_data_path}", flush=True)
+    print(f"  default_param_dir: {args.default_param_dir}", flush=True)
+    print(f"  precip_path/name: {args.precip_path} / {args.precip_name}", flush=True)
+    print(f"  pet_path/name: {args.pet_path} / {args.pet_name}", flush=True)
+    print(f"  gauge_outdir: {args.gauge_outdir}", flush=True)
+    print(f"  results_outdir: {args.results_outdir}", flush=True)
+    print("parameters:", json.dumps(base_params.values, indent=2, ensure_ascii=False), flush=True)
+    print(
+        "SCE config:",
+        json.dumps(
+            {
+                "criterion": args.sce_criterion,
+                "complexes": args.sce_complexes,
+                "complex_size": args.sce_complex_size,
+                "subset_size": args.sce_subset_size,
+                "evolutions": args.sce_evolutions,
+                "max_iter": args.sce_max_iter,
+                "max_evals": args.sce_max_evals,
+                "time_limit": args.sce_time_limit,
+                "seed": args.sce_seed,
+                "n_peaks": args.n_peaks,
+            },
+            indent=2,
+            ensure_ascii=False,
+        ),
+        flush=True,
+    )
     optimizer = SceUaOptimizer(
         runner=runner,
         base_params=base_params,
