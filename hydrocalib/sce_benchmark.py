@@ -429,8 +429,115 @@ def _prepare_simu_folder(args: argparse.Namespace) -> Path:
     return sce_folder
 
 
+def _ensure_control_file(sce_folder: Path, args: argparse.Namespace) -> None:
+    """Guarantee control.txt exists in the SCE folder.
+
+    Priority:
+    1) Reuse an existing control.txt under the SCE folder.
+    2) Copy control.txt from the base <site>_<tag> folder if present.
+    3) Attempt to synthesize control.txt using the same helpers as
+       ``hydro_cali_main.py`` so SCE benchmarks can run standalone.
+    """
+
+    control_path = sce_folder / "control.txt"
+    if control_path.exists():
+        return
+
+    base_folder = Path(args.cali_set_dir) / f"{args.site_num}_{args.cali_tag}"
+    base_control = base_folder / "control.txt"
+    if base_control.exists():
+        sce_folder.mkdir(parents=True, exist_ok=True)
+        print(f"Copying control.txt from {base_control} to {control_path}", flush=True)
+        shutil.copy2(base_control, control_path)
+        return
+
+    try:
+        from hydro_cali_main import (
+            DEFAULT_TEMPLATE,
+            build_control_text,
+            build_obs_csv_path,
+            ensure_abs_path,
+            get_usgs_site_info,
+        )
+    except Exception as exc:  # pragma: no cover - defensive import
+        raise FileNotFoundError(
+            f"control.txt missing in {sce_folder} and {base_folder}; "
+            "could not import helpers to synthesize one."
+        ) from exc
+
+    print(
+        f"control.txt not found; creating one in {control_path} using calibration arguments",
+        flush=True,
+    )
+
+    # Resolve absolute paths to mirror hydro_cali_main behavior.
+    basic_data_path = ensure_abs_path(args.basic_data_path)
+    default_param_dir = ensure_abs_path(args.default_param_dir)
+    precip_path = ensure_abs_path(args.precip_path)
+    pet_path = ensure_abs_path(args.pet_path)
+    gauge_outdir = ensure_abs_path(args.gauge_outdir)
+    results_outdir = ensure_abs_path(args.results_outdir)
+
+    crest_dir = Path(default_param_dir) / "crest_params"
+    kw_dir = Path(default_param_dir) / "kw_params"
+
+    dem_path = Path(basic_data_path) / "dem_usa.tif"
+    ddm_path = Path(basic_data_path) / "fdir_usa.tif"
+    fam_path = Path(basic_data_path) / "facc_usa.tif"
+
+    site_info = get_usgs_site_info(args.site_num)
+
+    control_text = build_control_text(
+        template=DEFAULT_TEMPLATE,
+        site_no=args.site_num,
+        lon=site_info.longitude,
+        lat=site_info.latitude,
+        basin_km2=site_info.drainage_area_km2,
+        DEM_PATH=str(dem_path),
+        DDM_PATH=str(ddm_path),
+        FAM_PATH=str(fam_path),
+        PRECIP_PATH=precip_path,
+        PRECIP_NAME=args.precip_name,
+        PET_PATH=pet_path,
+        PET_NAME=args.pet_name,
+        OBS_PATH=build_obs_csv_path(gauge_outdir, args.site_num),
+        WM_GRID=str(crest_dir / "wm_usa.tif"),
+        IM_GRID=str(crest_dir / "im_usa.tif"),
+        FC_GRID=str(crest_dir / "ksat_usa.tif"),
+        B_GRID=str(crest_dir / "b_usa.tif"),
+        WM=args.wm,
+        B=args.b,
+        IM=args.im,
+        KE=args.ke,
+        FC=args.fc,
+        IWU=args.iwu,
+        LEAKI_GRID=str(kw_dir / "leaki_usa.tif"),
+        ALPHA_GRID=str(kw_dir / "alpha_usa.tif"),
+        BETA_GRID=str(kw_dir / "beta_usa.tif"),
+        ALPHA0_GRID=str(kw_dir / "alpha0_usa.tif"),
+        UNDER=args.under,
+        LEAKI=args.leaki,
+        TH=args.th,
+        ISU=args.isu,
+        ALPHA=args.alpha,
+        BETA=args.beta,
+        ALPHA0=args.alpha0,
+        MODEL=args.model,
+        ROUTING=args.routing,
+        RESULTS_OUTDIR=results_outdir,
+        TIME_STEP=args.time_step,
+        TIME_BEGIN=args.time_begin,
+        TIME_END=args.time_end,
+    )
+
+    sce_folder.mkdir(parents=True, exist_ok=True)
+    control_path.write_text(control_text)
+    print(f"Wrote synthesized control.txt to {control_path}", flush=True)
+
+
 def run_cli(args: argparse.Namespace) -> Path:
     simu_folder = _prepare_simu_folder(args)
+    _ensure_control_file(simu_folder, args)
     runner = SimulationRunner(simu_folder=str(simu_folder), gauge_num=args.gauge_num)
     base_params = ParameterSet.from_object(args)
     rng = np.random.default_rng(args.sce_seed)
