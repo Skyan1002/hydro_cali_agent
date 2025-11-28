@@ -111,15 +111,18 @@ class SimulationRunner:
         return None
 
 
-def run_simulations_parallel(runner: SimulationRunner,
-                             params_list: Sequence[ParameterSet],
-                             round_index: int,
-                             max_workers: Optional[int] = None) -> List[SimulationResult]:
+def run_simulations_parallel(
+    runner: SimulationRunner,
+    params_list: Sequence[ParameterSet],
+    round_index: int,
+    max_workers: Optional[int] = None,
+    start_index: int = 0,
+) -> List[SimulationResult]:
     results: List[SimulationResult] = []
     worker_count = max_workers or min(len(params_list), os.cpu_count() or len(params_list))
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         future_to_idx = {
-            executor.submit(runner.run, params, round_index, idx): idx
+            executor.submit(runner.run, params, round_index, start_index + idx): start_index + idx
             for idx, params in enumerate(params_list)
         }
         for future in as_completed(future_to_idx):

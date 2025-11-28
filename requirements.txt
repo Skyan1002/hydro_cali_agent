@@ -1,6 +1,7 @@
 # Core numerical/data libraries
 numpy
 pandas
+scipy>=1.7.0
 
 # Plotting utilities for hydrographs and calibration diagnostics
 matplotlib
