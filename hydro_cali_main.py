@@ -28,8 +28,9 @@ from typing import Optional, Any, Union, Iterable
 import requests
 import rasterio
 import numpy as np
+from osgeo import gdal
 from rasterio.coords import BoundingBox
-from rasterio.windows import from_bounds, Window
+from rasterio.windows import from_bounds
 from tqdm import tqdm
 
 # ----------------------------- constants ---------------------------------
@@ -346,14 +347,14 @@ def _current_timestamp_label() -> str:
 def _compute_precip_bounds(lat: float, lon: float, drainage_area_km2: Optional[float]) -> Optional[BoundingBox]:
     """Estimate a lat/lon bounding box for clipping MRMS based on drainage area.
 
-    The MRMS grid is ~0.01°; we use x = sqrt(A)/100 and clip ±4x around the site.
+    The MRMS grid is ~0.01°; we use x = sqrt(A)/100 and clip ±2x around the site.
     Returns None if the drainage area is unavailable.
     """
 
     if drainage_area_km2 is None or drainage_area_km2 <= 0:
         return None
     x_deg = math.sqrt(drainage_area_km2) / 100.0
-    half_span = 4 * x_deg
+    half_span = 2 * x_deg
     return BoundingBox(
         left=lon - half_span,
         bottom=lat - half_span,
@@ -369,107 +370,41 @@ def _iter_precip_files(src_dir: Path) -> Iterable[Path]:
 
 
 def _clip_raster(src_path: Path, dst_path: Path, bounds: BoundingBox) -> None:
-    with rasterio.open(src_path) as src:
-        dataset_bounds = BoundingBox(*src.bounds)
-        clip_bounds = BoundingBox(
-            left=max(bounds.left, dataset_bounds.left),
-            bottom=max(bounds.bottom, dataset_bounds.bottom),
-            right=min(bounds.right, dataset_bounds.right),
-            top=min(bounds.top, dataset_bounds.top),
-        )
-        if clip_bounds.left >= clip_bounds.right or clip_bounds.bottom >= clip_bounds.top:
-            raise ValueError(f"Clip bounds outside raster extent for {src_path}")
+    output_path = dst_path
+    nodata_val = -9999
 
-        window = from_bounds(
-            left=clip_bounds.left,
-            bottom=clip_bounds.bottom,
-            right=clip_bounds.right,
-            top=clip_bounds.top,
-            transform=src.transform,
-        )
-        window = window.round_offsets().round_lengths()
-        window = window.intersection(Window(0, 0, src.width, src.height))
+    # Open the grib2 file using GDAL for metadata and optional full copy
+    src_ds = gdal.Open(str(src_path))
+    if src_ds is None:
+        raise ValueError(f"Could not open file {src_path}")
 
-        data = src.read(window=window)
-        transform = rasterio.windows.transform(window, src.transform)
-        profile = src.profile.copy()
-        nodata_val = -9999.0
+    try:
+        # Process with basin clipping using rasterio
+        with rasterio.open(src_path) as src:
+            window = from_bounds(bounds.left, bounds.bottom, bounds.right, bounds.top, src.transform)
+            clipped_data = src.read(1, window=window)
+            clipped_data = np.where((clipped_data > 1000) | (clipped_data < 0), nodata_val, clipped_data)
+            clipped_data = clipped_data.astype(np.float32)
 
-        # Normalize profile/data so CREST ingests clipped rasters identically to originals
-        data = data.astype("float32", copy=False)
-        src_nodata = src.nodatavals[0] if src.nodatavals else None
-        if src_nodata is not None:
-            data = np.where(data == src_nodata, nodata_val, data)
-        data = np.where(np.isnan(data), nodata_val, data)
-        data = np.where((data > 1000) | (data < 0), nodata_val, data)
+            clipped_transform = rasterio.windows.transform(window, src.transform)
 
-        # Preserve original profile characteristics (compression, tiling, etc.)
-        # while updating dimensions and data type to match the clipped data.
-        compress = profile.get("compress")
-        if compress is None and profile.get("compression"):
-            compress = profile.get("compression")
+            new_meta = {
+                "driver": "GTiff",
+                "height": clipped_data.shape[0],
+                "width": clipped_data.shape[1],
+                "count": 1,
+                "dtype": "float32",
+                "crs": src.crs,
+                "transform": clipped_transform,
+                "nodata": nodata_val,
+                "compress": "none",
+            }
 
-        profile.update({
-            "height": data.shape[1],
-            "width": data.shape[2],
-            "transform": transform,
-            "dtype": "float32",
-            "nodata": nodata_val,
-            "count": data.shape[0],
-        })
-        if compress:
-            profile["compress"] = compress
-
-        dst_path.parent.mkdir(parents=True, exist_ok=True)
-        with rasterio.open(dst_path, "w", **profile) as dst:
-            dst.write(data)
-
-
-def _clip_raster_preserve_profile(src_path: Path, dst_path: Path, bounds: BoundingBox) -> None:
-    """Clip raster to bounds while preserving dtype/nodata/metadata."""
-
-    with rasterio.open(src_path) as src:
-        dataset_bounds = BoundingBox(*src.bounds)
-        clip_bounds = BoundingBox(
-            left=max(bounds.left, dataset_bounds.left),
-            bottom=max(bounds.bottom, dataset_bounds.bottom),
-            right=min(bounds.right, dataset_bounds.right),
-            top=min(bounds.top, dataset_bounds.top),
-        )
-        if clip_bounds.left >= clip_bounds.right or clip_bounds.bottom >= clip_bounds.top:
-            raise ValueError(f"Clip bounds outside raster extent for {src_path}")
-
-        window = from_bounds(
-            left=clip_bounds.left,
-            bottom=clip_bounds.bottom,
-            right=clip_bounds.right,
-            top=clip_bounds.top,
-            transform=src.transform,
-        )
-        window = window.round_offsets().round_lengths()
-        window = window.intersection(Window(0, 0, src.width, src.height))
-
-        data = src.read(window=window)
-        transform = rasterio.windows.transform(window, src.transform)
-        profile = src.profile.copy()
-
-        compress = profile.get("compress")
-        if compress is None and profile.get("compression"):
-            compress = profile.get("compression")
-
-        profile.update({
-            "height": data.shape[1],
-            "width": data.shape[2],
-            "transform": transform,
-            "count": data.shape[0],
-            "nodata": src.nodatavals[0] if src.nodatavals else profile.get("nodata"),
-        })
-        if compress:
-            profile["compress"] = compress
-
-        dst_path.parent.mkdir(parents=True, exist_ok=True)
-        with rasterio.open(dst_path, "w", **profile) as dst:
-            dst.write(data)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            with rasterio.open(output_path, "w", **new_meta) as dst:
+                dst.write(clipped_data, 1)
+    finally:
+        src_ds = None
 
 
 def clip_mrms_dataset(src_dir: str, dst_dir: str, bounds: BoundingBox) -> str:
@@ -501,44 +436,6 @@ def clip_mrms_dataset(src_dir: str, dst_dir: str, bounds: BoundingBox) -> str:
         _clip_raster(tif, dst_file, bounds)
 
     return str(dst_path)
-
-
-def clip_basic_datasets(src_dir: str, dst_dir: str, bounds: BoundingBox) -> dict:
-    """Clip DEM/DDM/FACC rasters to ``bounds`` and return new paths."""
-
-    expected = {
-        "dem_usa.tif": "dem",
-        "fdir_usa.tif": "ddm",
-        "facc_usa.tif": "fam",
-    }
-
-    src_path = Path(src_dir)
-    dst_path = Path(dst_dir)
-    ensure_dir(str(dst_path))
-
-    if not src_path.exists():
-        raise FileNotFoundError(f"Basic data directory not found: {src_path}")
-
-    clipped_paths = {}
-    missing_sources = [fname for fname in expected if not (src_path / fname).exists()]
-    if missing_sources:
-        print(f"[WARN] Missing basic data files: {', '.join(missing_sources)}")
-
-    existing_targets = [fname for fname in expected if (dst_path / fname).exists()]
-    if len(existing_targets) == len(expected):
-        print(f"[INFO] Using existing clipped basic data at {dst_path}")
-        return {key: str(dst_path / fname) for fname, key in expected.items()}
-
-    print(f"[INFO] Clipping basic datasets to {dst_path} ...")
-    for fname in tqdm(expected, desc="Clipping basic data", unit="file"):
-        src_file = src_path / fname
-        dst_file = dst_path / fname
-        if not src_file.exists():
-            continue
-        _clip_raster_preserve_profile(src_file, dst_file, bounds)
-        clipped_paths[fname] = str(dst_file)
-
-    return {key: clipped_paths.get(fname, str(src_path / fname)) for fname, key in expected.items()}
 
 
 def build_obs_csv_path(gauge_outdir: str, site_no: str) -> str:
@@ -646,11 +543,6 @@ def main():
     else:
         clip_dir = os.path.join(control_folder, "data_mrms_clip")
         args.precip_path = clip_mrms_dataset(args.precip_path, clip_dir, clip_bounds)
-        basic_clip_dir = os.path.join(control_folder, "data_basic_clip")
-        clipped_basic = clip_basic_datasets(args.basic_data_path, basic_clip_dir, clip_bounds)
-        dem_path = clipped_basic.get("dem", dem_path)
-        ddm_path = clipped_basic.get("ddm", ddm_path)
-        fam_path = clipped_basic.get("fam", fam_path)
 
     # 4) Optionally download the hourly CSV
     if not args.skip_gauge_download:

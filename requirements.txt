@@ -10,6 +10,7 @@ requests
 dataretrieval
 rasterio
 tqdm
+gdal
 
 # LLM agent tooling
 openai
