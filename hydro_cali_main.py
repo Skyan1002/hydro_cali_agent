@@ -346,14 +346,14 @@ def _current_timestamp_label() -> str:
 def _compute_precip_bounds(lat: float, lon: float, drainage_area_km2: Optional[float]) -> Optional[BoundingBox]:
     """Estimate a lat/lon bounding box for clipping MRMS based on drainage area.
 
-    The MRMS grid is ~0.01°; we use x = sqrt(A)/100 and clip ±2x around the site.
+    The MRMS grid is ~0.01°; we use x = sqrt(A)/100 and clip ±4x around the site.
     Returns None if the drainage area is unavailable.
     """
 
     if drainage_area_km2 is None or drainage_area_km2 <= 0:
         return None
     x_deg = math.sqrt(drainage_area_km2) / 100.0
-    half_span = 2 * x_deg
+    half_span = 4 * x_deg
     return BoundingBox(
         left=lon - half_span,
         bottom=lat - half_span,
