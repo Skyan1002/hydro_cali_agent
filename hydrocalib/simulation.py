@@ -17,6 +17,7 @@ from .parameters import ParameterSet
 
 
 CONTROL_PATTERN = re.compile(r"^(OUTPUT\s*=\s*).*$", re.MULTILINE)
+STATES_PATTERN = re.compile(r"^(STATES\s*=\s*).*$", re.MULTILINE)
 
 
 @dataclass
@@ -77,6 +78,11 @@ class SimulationRunner:
             content = CONTROL_PATTERN.sub(rf"\1{output_dir}/", content)
         else:
             content += f"\nOUTPUT={output_dir}/\n"
+
+        if STATES_PATTERN.search(content):
+            content = STATES_PATTERN.sub(rf"\1{output_dir}/", content)
+        else:
+            content += f"\nSTATES={output_dir}/\n"
         return content
 
     def _write_control_file(self, content: str, round_index: int, candidate_index: int) -> str:
