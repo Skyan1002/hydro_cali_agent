@@ -18,6 +18,7 @@ import argparse
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -194,7 +195,7 @@ alpha={ALPHA}
 beta={BETA}
 alpha0={ALPHA0}
 
-[Task Simu]
+[Task warmup]
 STYLE=SIMU
 MODEL={MODEL}
 ROUTING={ROUTING}
@@ -205,10 +206,28 @@ OUTPUT={RESULTS_OUTDIR}
 PARAM_SET=CrestParam
 ROUTING_PARAM_Set=KWParam
 TIMESTEP={TIME_STEP}
+STATES={STATE_PATH}
+TIME_STATE={WARMUP_TIME_STATE}
+TIME_BEGIN={WARMUP_TIME_BEGIN}
+TIME_END={WARMUP_TIME_END}
+
+[Task Simu]
+STYLE=SIMU
+MODEL={MODEL}
+ROUTING={ROUTING}
+BASIN=0
+PRECIP=MRMS
+PET=PET
+STATES={STATE_PATH}
+OUTPUT={RESULTS_OUTDIR}
+PARAM_SET=CrestParam
+ROUTING_PARAM_Set=KWParam
+TIMESTEP={TIME_STEP}
 TIME_BEGIN={TIME_BEGIN}
 TIME_END={TIME_END}
 
 [Execute]
+TASK=warmup
 TASK=Simu
 """.rstrip() + "\n"
 
@@ -297,6 +316,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--time_begin", required=True, help="YYYYMMDDhhmm, e.g., 201801010000")
     p.add_argument("--time_end", required=True, help="YYYYMMDDhhmm, e.g., 201812312300")
     p.add_argument("--time_step", default="1h", help="CREST time step, e.g., 1h")
+    p.add_argument("--warmup_time_begin", default="201710010000",
+                   help="Warmup simulation start time (YYYYMMDDhhmm); default=201710010000")
+    p.add_argument("--warmup_time_end", default="201801010000",
+                   help="Warmup simulation end time (YYYYMMDDhhmm); default=201801010000")
 
     # Model/routing
     p.add_argument("--model", default="CREST")
@@ -421,14 +444,22 @@ def clip_mrms_dataset(src_dir: str, dst_dir: str, bounds: BoundingBox) -> str:
     if not src_path.exists():
         raise FileNotFoundError(f"MRMS source directory not found: {src_path}")
 
-    if any(dst_path.iterdir()):
-        print(f"[INFO] Using existing clipped MRMS data at {dst_path}")
-        return str(dst_path)
-
     tif_files = list(_iter_precip_files(src_path))
     if not tif_files:
         print(f"[WARN] No MRMS raster files found under {src_path}; skipping clipping.")
         return str(dst_path)
+
+    existing = list(_iter_precip_files(dst_path))
+    if existing:
+        src_names = {p.name for p in tif_files}
+        dst_names = {p.name for p in existing}
+        if src_names == dst_names:
+            print(f"[INFO] Using existing clipped MRMS data at {dst_path}")
+            return str(dst_path)
+
+        print(f"[INFO] Refreshing clipped MRMS data in {dst_path} to match source files")
+        for path in existing:
+            path.unlink()
 
     print(f"[INFO] Clipping {len(tif_files)} MRMS files to {dst_path} ...")
     for tif in tqdm(tif_files, desc="Clipping MRMS", unit="file"):
@@ -501,6 +532,8 @@ def main():
     args.gauge_outdir      = ensure_abs_path(args.gauge_outdir)
     args.results_outdir    = ensure_abs_path(args.results_outdir)
     args.usgs_script_path  = ensure_abs_path(args.usgs_script_path)
+
+    warmup_time_state = args.warmup_time_end
     
     dem_path = os.path.join(args.basic_data_path, "dem_usa.tif")
     ddm_path = os.path.join(args.basic_data_path, "fdir_usa.tif")
@@ -583,7 +616,11 @@ def main():
         ALPHA=args.alpha, BETA=args.beta, ALPHA0=args.alpha0,
         MODEL=args.model, ROUTING=args.routing,
         RESULTS_OUTDIR=args.results_outdir,
+        STATE_PATH=args.results_outdir,
         TIME_STEP=args.time_step,
+        WARMUP_TIME_STATE=warmup_time_state,
+        WARMUP_TIME_BEGIN=args.warmup_time_begin,
+        WARMUP_TIME_END=args.warmup_time_end,
         TIME_BEGIN=args.time_begin,
         TIME_END=args.time_end,
     )

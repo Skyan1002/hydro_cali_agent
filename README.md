@@ -70,6 +70,7 @@ echo "OPENAI_API_KEY=<YOUR_OPENAI_API_KEY>" > .env
 | `--gauge_outdir` | Where the script stores downloaded hourly USGS CSV files (`USGS_<id>_1h_UTC.csv`). |
 | `--results_outdir` | Target directory recorded in the template control file; EF5 run artifacts end up under `<cali_set>/<site>/<results/...` when managed by the runner. |
 | `--time_begin`, `--time_end` | Simulation window in `YYYYMMDDhhmm`. Controls both data download span and EF5 control file. |
+| `--warmup_time_begin`, `--warmup_time_end` | Warmup run window (defaults `201710010000` → `201801010000`) written to the `[Task warmup]` block. |
 | `--time_step` | EF5 timestep (default `1h`), also forwarded to the USGS downloader. |
 | `--model`, `--routing` | EF5 model and routing scheme names written into `[Task Simu]`. Defaults are `CREST` and `KW`. |
 | `--wm`, `--b`, `--im`, `--ke`, `--fc`, `--iwu` | Scalar Crest parameter seeds used as the starting point for candidate generation (override raster-derived defaults). |
