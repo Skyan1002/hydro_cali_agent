@@ -496,14 +496,21 @@ def run_usgs_downloader(python_exec: str,
                         site_no: str,
                         time_begin: str,
                         time_end: str,
+                        test_time_end: Optional[str],
                         time_step: str,
                         outdir: str) -> None:
     """Call your existing usgs_gauge_download.py via subprocess."""
+    def _max_time_str(*times: str) -> str:
+        """Return the latest timestamp (YYYYMMDDHH) among the provided values."""
+        parsed = [datetime.strptime(t[:10], "%Y%m%d%H") for t in times if t]
+        return max(parsed).strftime("%Y%m%d%H")
+
+    download_end = _max_time_str(time_end, test_time_end)
     cmd = [
         python_exec, script_path,
         "--site_num", site_no,
         "--time_start", time_begin[:10],  # expects YYYYMMDDhh
-        "--time_end", time_end[:10],
+        "--time_end", download_end,
         "--time_step", time_step,
         "--output", outdir
     ]
@@ -601,6 +608,7 @@ def main():
             site_no=site,
             time_begin=args.time_begin,
             time_end=args.time_end,
+            test_time_end=args.test_time_end,
             time_step=args.time_step,
             outdir=args.gauge_outdir
         )
