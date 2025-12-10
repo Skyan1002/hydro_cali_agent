@@ -19,6 +19,7 @@ from .parameters import ParameterSet
 CONTROL_PATTERN = re.compile(r"^(OUTPUT\s*=\s*).*$", re.MULTILINE)
 STATES_PATTERN = re.compile(r"^(STATES\s*=\s*).*$", re.MULTILINE)
 SCALAR_PATTERN = lambda name: re.compile(rf"^{name}\s*=\s*.*$", re.MULTILINE)
+TASK_BLOCK_PATTERN = lambda task: re.compile(rf"(?s)(\[Task {re.escape(task)}\].*?)(?=\n\[Task|\Z)")
 
 
 @dataclass
@@ -78,6 +79,21 @@ class SimulationRunner:
             return pattern.sub(f"{name}={value}", content)
         return content + f"\n{name}={value}\n"
 
+    def _apply_task_scalar(self, content: str, task: str, field: str, value: Optional[str]) -> str:
+        if value is None:
+            return content
+        block_pattern = TASK_BLOCK_PATTERN(task)
+        match = block_pattern.search(content)
+        if not match:
+            return content
+
+        block = match.group(1)
+        updated = re.sub(rf"^{field}\s*=.*$", f"{field}={value}", block, flags=re.MULTILINE)
+        if block == updated:
+            updated = block + f"\n{field}={value}"
+
+        return content[:match.start(1)] + updated + content[match.end(1):]
+
     def _render_control(self,
                         params: ParameterSet,
                         output_dir: str,
@@ -100,7 +116,23 @@ class SimulationRunner:
             content += f"\nSTATES={states_target}/\n"
 
         if scalar_overrides:
-            for name, value in scalar_overrides.items():
+            overrides = dict(scalar_overrides)
+
+            # Apply warmup-task-specific overrides without touching the main SIMU task.
+            warmup_begin = overrides.pop("WARMUP_TIME_BEGIN", None)
+            warmup_end = overrides.pop("WARMUP_TIME_END", None)
+            warmup_state = overrides.pop("WARMUP_TIME_STATE", overrides.pop("TIME_STATE", None))
+            content = self._apply_task_scalar(content, "warmup", "TIME_BEGIN", warmup_begin)
+            content = self._apply_task_scalar(content, "warmup", "TIME_END", warmup_end)
+            content = self._apply_task_scalar(content, "warmup", "TIME_STATE", warmup_state)
+
+            # Apply main simulation window overrides to the Simu task only.
+            main_begin = overrides.pop("TIME_BEGIN", None)
+            main_end = overrides.pop("TIME_END", None)
+            content = self._apply_task_scalar(content, "Simu", "TIME_BEGIN", main_begin)
+            content = self._apply_task_scalar(content, "Simu", "TIME_END", main_end)
+
+            for name, value in overrides.items():
                 content = self._apply_scalar(content, name, value)
         return content
 
