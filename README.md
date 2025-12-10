@@ -64,11 +64,13 @@ echo "OPENAI_API_KEY=<YOUR_OPENAI_API_KEY>" > .env
 | `--default_param_dir` | Folder with `crest_params/` & `kw_params/` grids (e.g., `wm_usa.tif`, `alpha_usa.tif`) used as spatial priors. |
 | `--cali_set_dir` | Root folder where site-specific subdirectories (control files, histories, plots) are created. Defaults to `./cali_set`. |
 | `--cali_tag` | Text appended to the site folder (`<site>_<tag>`) to distinguish multiple experiments (e.g., `2018`, `stormA`). |
+| `--folder_label` | Optional extra suffix after `<site>_<tag>` when creating the calibration folder. Defaults to the creation timestamp `YYYYMMDDHHmm`. |
 | `--precip_path`, `--precip_name` | Location and filename pattern for precipitation rasters passed to EF5’s `[PrecipForcing]`. |
 | `--pet_path`, `--pet_name` | PET raster location/pattern for `[PETForcing]`. |
 | `--gauge_outdir` | Where the script stores downloaded hourly USGS CSV files (`USGS_<id>_1h_UTC.csv`). |
 | `--results_outdir` | Target directory recorded in the template control file; EF5 run artifacts end up under `<cali_set>/<site>/<results/...` when managed by the runner. |
 | `--time_begin`, `--time_end` | Simulation window in `YYYYMMDDhhmm`. Controls both data download span and EF5 control file. |
+| `--warmup_time_begin`, `--warmup_time_end` | Warmup run window (defaults `201710010000` → `201801010000`) written to the `[Task warmup]` block. |
 | `--time_step` | EF5 timestep (default `1h`), also forwarded to the USGS downloader. |
 | `--model`, `--routing` | EF5 model and routing scheme names written into `[Task Simu]`. Defaults are `CREST` and `KW`. |
 | `--wm`, `--b`, `--im`, `--ke`, `--fc`, `--iwu` | Scalar Crest parameter seeds used as the starting point for candidate generation (override raster-derived defaults). |

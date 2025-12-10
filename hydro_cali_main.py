@@ -15,14 +15,24 @@ Key changes:
 """
 
 import argparse
+import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
-from typing import Optional, Any, Union
+from datetime import datetime
+from pathlib import Path
+from typing import Optional, Any, Union, Iterable
 
 import requests
+import rasterio
+import numpy as np
+from osgeo import gdal
+from rasterio.coords import BoundingBox
+from rasterio.windows import from_bounds
+from tqdm import tqdm
 
 # ----------------------------- constants ---------------------------------
 MI2_TO_KM2 = 2.58999
@@ -185,7 +195,7 @@ alpha={ALPHA}
 beta={BETA}
 alpha0={ALPHA0}
 
-[Task Simu]
+[Task warmup]
 STYLE=SIMU
 MODEL={MODEL}
 ROUTING={ROUTING}
@@ -196,10 +206,28 @@ OUTPUT={RESULTS_OUTDIR}
 PARAM_SET=CrestParam
 ROUTING_PARAM_Set=KWParam
 TIMESTEP={TIME_STEP}
+STATES={RESULTS_OUTDIR}
+TIME_STATE={WARMUP_TIME_STATE}
+TIME_BEGIN={WARMUP_TIME_BEGIN}
+TIME_END={WARMUP_TIME_END}
+
+[Task Simu]
+STYLE=SIMU
+MODEL={MODEL}
+ROUTING={ROUTING}
+BASIN=0
+PRECIP=MRMS
+PET=PET
+STATES={RESULTS_OUTDIR}
+OUTPUT={RESULTS_OUTDIR}
+PARAM_SET=CrestParam
+ROUTING_PARAM_Set=KWParam
+TIMESTEP={TIME_STEP}
 TIME_BEGIN={TIME_BEGIN}
 TIME_END={TIME_END}
 
 [Execute]
+TASK=warmup
 TASK=Simu
 """.rstrip() + "\n"
 
@@ -271,6 +299,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cali_set_dir", default="./cali_set",
                    help="Base folder to hold <site>_<tag>/control.txt")
     p.add_argument("--cali_tag", default="2018", help="Suffix tag for the calibration folder name")
+    p.add_argument("--folder_label", default=None,
+                   help="Extra label appended to the calibration folder; defaults to creation timestamp (YYYYMMDDHHmm)")
 
     # Forcings
     p.add_argument("--precip_path", required=True, help="Folder of precipitation rasters")
@@ -286,6 +316,26 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--time_begin", required=True, help="YYYYMMDDhhmm, e.g., 201801010000")
     p.add_argument("--time_end", required=True, help="YYYYMMDDhhmm, e.g., 201812312300")
     p.add_argument("--time_step", default="1h", help="CREST time step, e.g., 1h")
+    p.add_argument("--warmup_time_begin", default="201710010000",
+                   help="Warmup simulation start time (YYYYMMDDhhmm); default=201710010000")
+    p.add_argument("--warmup_time_end", default="201801010000",
+                   help="Warmup simulation end time (YYYYMMDDhhmm); default=201801010000")
+    p.add_argument("--test_warmup_begin", default="201801010000",
+                   help="Test run warmup start (YYYYMMDDhhmm); default=201801010000")
+    p.add_argument("--test_warmup_end", default="201901010000",
+                   help="Test run warmup end/time_state (YYYYMMDDhhmm); default=201901010000")
+    p.add_argument("--test_time_begin", default="201901010000",
+                   help="Test simulation start time (YYYYMMDDhhmm); default=201901010000")
+    p.add_argument("--test_time_end", default="201912312300",
+                   help="Test simulation end time (YYYYMMDDhhmm); default=201912312300")
+    p.add_argument("--test_time_step", default="1h",
+                   help="Test simulation timestep override; default=1h")
+    p.add_argument("--test_eval_start", default="2019-01-01 00:00",
+                   help="Start of evaluation window for test metrics")
+    p.add_argument("--test_eval_end", default="2019-12-31 23:00",
+                   help="End of evaluation window for test metrics")
+    p.add_argument("--disable_test_run", action="store_true",
+                   help="Skip running the parallel 2019 test simulations")
 
     # Model/routing
     p.add_argument("--model", default="CREST")
@@ -328,6 +378,113 @@ def ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
 
+def _current_timestamp_label() -> str:
+    """Return the default folder label (current time in YYYYMMDDHHmm)."""
+    return datetime.now().strftime("%Y%m%d%H%M")
+
+
+def _compute_precip_bounds(lat: float, lon: float, drainage_area_km2: Optional[float]) -> Optional[BoundingBox]:
+    """Estimate a lat/lon bounding box for clipping MRMS based on drainage area.
+
+    The MRMS grid is ~0.01°; we use x = sqrt(A)/100 and clip ±2x around the site.
+    Returns None if the drainage area is unavailable.
+    """
+
+    if drainage_area_km2 is None or drainage_area_km2 <= 0:
+        return None
+    x_deg = math.sqrt(drainage_area_km2) / 100.0
+    half_span = 2 * x_deg
+    return BoundingBox(
+        left=lon - half_span,
+        bottom=lat - half_span,
+        right=lon + half_span,
+        top=lat + half_span,
+    )
+
+
+def _iter_precip_files(src_dir: Path) -> Iterable[Path]:
+    for path in sorted(src_dir.iterdir()):
+        if path.is_file() and path.suffix.lower() in {".tif", ".tiff"}:
+            yield path
+
+
+def _clip_raster(src_path: Path, dst_path: Path, bounds: BoundingBox) -> None:
+    output_path = dst_path
+    nodata_val = -9999
+
+    # Open the grib2 file using GDAL for metadata and optional full copy
+    src_ds = gdal.Open(str(src_path))
+    if src_ds is None:
+        raise ValueError(f"Could not open file {src_path}")
+
+    try:
+        # Process with basin clipping using rasterio
+        with rasterio.open(src_path) as src:
+            window = from_bounds(bounds.left, bounds.bottom, bounds.right, bounds.top, src.transform)
+            clipped_data = src.read(1, window=window)
+            clipped_data = np.where((clipped_data > 1000) | (clipped_data < 0), nodata_val, clipped_data)
+            clipped_data = clipped_data.astype(np.float32)
+
+            clipped_transform = rasterio.windows.transform(window, src.transform)
+
+            new_meta = {
+                "driver": "GTiff",
+                "height": clipped_data.shape[0],
+                "width": clipped_data.shape[1],
+                "count": 1,
+                "dtype": "float32",
+                "crs": src.crs,
+                "transform": clipped_transform,
+                "nodata": nodata_val,
+                "compress": "none",
+            }
+
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            with rasterio.open(output_path, "w", **new_meta) as dst:
+                dst.write(clipped_data, 1)
+    finally:
+        src_ds = None
+
+
+def clip_mrms_dataset(src_dir: str, dst_dir: str, bounds: BoundingBox) -> str:
+    """Clip all MRMS GeoTIFF files in ``src_dir`` into ``dst_dir``.
+
+    Keeps filenames intact so downstream CREST ingestion remains unchanged.
+    Displays a progress bar while clipping.
+    """
+
+    src_path = Path(src_dir)
+    dst_path = Path(dst_dir)
+    ensure_dir(str(dst_path))
+
+    if not src_path.exists():
+        raise FileNotFoundError(f"MRMS source directory not found: {src_path}")
+
+    tif_files = list(_iter_precip_files(src_path))
+    if not tif_files:
+        print(f"[WARN] No MRMS raster files found under {src_path}; skipping clipping.")
+        return str(dst_path)
+
+    existing = list(_iter_precip_files(dst_path))
+    if existing:
+        src_names = {p.name for p in tif_files}
+        dst_names = {p.name for p in existing}
+        if src_names == dst_names:
+            print(f"[INFO] Using existing clipped MRMS data at {dst_path}")
+            return str(dst_path)
+
+        print(f"[INFO] Refreshing clipped MRMS data in {dst_path} to match source files")
+        for path in existing:
+            path.unlink()
+
+    print(f"[INFO] Clipping {len(tif_files)} MRMS files to {dst_path} ...")
+    for tif in tqdm(tif_files, desc="Clipping MRMS", unit="file"):
+        dst_file = dst_path / tif.name
+        _clip_raster(tif, dst_file, bounds)
+
+    return str(dst_path)
+
+
 def build_obs_csv_path(gauge_outdir: str, site_no: str) -> str:
     """OBS file naming follows your convention: USGS_<id>_1h_UTC.csv"""
     ensure_dir(gauge_outdir)
@@ -339,14 +496,21 @@ def run_usgs_downloader(python_exec: str,
                         site_no: str,
                         time_begin: str,
                         time_end: str,
+                        test_time_end: Optional[str],
                         time_step: str,
                         outdir: str) -> None:
     """Call your existing usgs_gauge_download.py via subprocess."""
+    def _max_time_str(*times: str) -> str:
+        """Return the latest timestamp (YYYYMMDDHH) among the provided values."""
+        parsed = [datetime.strptime(t[:10], "%Y%m%d%H") for t in times if t]
+        return max(parsed).strftime("%Y%m%d%H")
+
+    download_end = _max_time_str(time_end, test_time_end)
     cmd = [
         python_exec, script_path,
         "--site_num", site_no,
         "--time_start", time_begin[:10],  # expects YYYYMMDDhh
-        "--time_end", time_end[:10],
+        "--time_end", download_end,
         "--time_step", time_step,
         "--output", outdir
     ]
@@ -379,6 +543,9 @@ def main():
     args = parse_args()
     site = args.site_num
 
+    if not args.folder_label:
+        args.folder_label = _current_timestamp_label()
+
     # Resolve fixed filenames from the two root folders
     args.basic_data_path   = ensure_abs_path(args.basic_data_path)
     args.default_param_dir = ensure_abs_path(args.default_param_dir)
@@ -388,6 +555,8 @@ def main():
     args.gauge_outdir      = ensure_abs_path(args.gauge_outdir)
     args.results_outdir    = ensure_abs_path(args.results_outdir)
     args.usgs_script_path  = ensure_abs_path(args.usgs_script_path)
+
+    warmup_time_state = args.warmup_time_end
     
     dem_path = os.path.join(args.basic_data_path, "dem_usa.tif")
     ddm_path = os.path.join(args.basic_data_path, "fdir_usa.tif")
@@ -420,10 +589,18 @@ def main():
           f"area_km2={'NA' if info.drainage_area_km2 is None else f'{info.drainage_area_km2:.2f}'}")
 
     # 2) Resolve folders and OBS CSV path
-    control_folder = os.path.join(args.cali_set_dir, f"{site}_{args.cali_tag}")
+    control_folder = os.path.join(args.cali_set_dir, f"{site}_{args.cali_tag}_{args.folder_label}")
     obs_csv_path = build_obs_csv_path(args.gauge_outdir, site)
 
-    # 3) Optionally download the hourly CSV
+    # 3) Clip MRMS to a site-specific subset for faster runs
+    clip_bounds = _compute_precip_bounds(info.latitude, info.longitude, info.drainage_area_km2)
+    if clip_bounds is None:
+        print("[WARN] Drainage area unknown; skipping MRMS clipping and using original precip path.")
+    else:
+        clip_dir = os.path.join(control_folder, "data_mrms_clip")
+        args.precip_path = clip_mrms_dataset(args.precip_path, clip_dir, clip_bounds)
+
+    # 4) Optionally download the hourly CSV
     if not args.skip_gauge_download:
         run_usgs_downloader(
             python_exec=args.python_exec,
@@ -431,13 +608,14 @@ def main():
             site_no=site,
             time_begin=args.time_begin,
             time_end=args.time_end,
+            test_time_end=args.test_time_end,
             time_step=args.time_step,
             outdir=args.gauge_outdir
         )
     else:
         print("[INFO] Skipping gauge download as requested.")
 
-    # 4) Build control.txt content
+    # 5) Build control.txt content
     control_text = build_control_text(
         template=DEFAULT_TEMPLATE,
         site_no=site,
@@ -462,23 +640,48 @@ def main():
         ALPHA=args.alpha, BETA=args.beta, ALPHA0=args.alpha0,
         MODEL=args.model, ROUTING=args.routing,
         RESULTS_OUTDIR=args.results_outdir,
+        STATE_PATH=args.results_outdir,
         TIME_STEP=args.time_step,
+        WARMUP_TIME_STATE=warmup_time_state,
+        WARMUP_TIME_BEGIN=args.warmup_time_begin,
+        WARMUP_TIME_END=args.warmup_time_end,
         TIME_BEGIN=args.time_begin,
         TIME_END=args.time_end,
     )
 
-    # 5) Write control.txt
+    # 6) Write control.txt
     control_path = write_control_file(control_folder, control_text)
     print(f"[INFO] control.txt written to: {control_path}")
 
-    # 6) Run calibration
+    # 7) Run calibration
     TwoStageCalibrationManager = try_import_manager()
+
+    test_config = None
+    if not args.disable_test_run:
+        try:
+            from hydrocalib.agents.manager import TestConfig
+
+            test_config = TestConfig(
+                enabled=True,
+                warmup_begin=args.test_warmup_begin,
+                warmup_end=args.test_warmup_end,
+                warmup_state=args.test_warmup_end,
+                time_begin=args.test_time_begin,
+                time_end=args.test_time_end,
+                timestep=args.test_time_step,
+                eval_start=args.test_eval_start,
+                eval_end=args.test_eval_end,
+            )
+        except Exception as e:
+            print(f"[WARN] Could not configure test simulations: {e}")
+
     calib = TwoStageCalibrationManager(
         args,
         simu_folder=os.path.relpath(control_folder, start=os.getcwd()),
         gauge_num=site,
         n_candidates=args.n_candidates,
         n_peaks=args.n_peaks,
+        test_config=test_config,
     )
     print(f"[INFO] Starting calibration (max_rounds={args.max_rounds}) ...")
     calib.run(max_rounds=args.max_rounds)

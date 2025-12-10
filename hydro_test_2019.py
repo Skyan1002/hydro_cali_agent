@@ -151,6 +151,7 @@ def ensure_gauge_data(site_num: str,
         site_no=site_num,
         time_begin=time_begin,
         time_end=time_end,
+        test_time_end=time_end,
         time_step=time_step,
         outdir=str(out_dir),
     )

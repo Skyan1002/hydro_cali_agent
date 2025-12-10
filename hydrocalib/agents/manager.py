@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -15,7 +16,7 @@ from ..config import (DEFAULT_GAUGE_NUM, DEFAULT_PEAK_PICK_KWARGS, DEFAULT_SIM_F
                        EVENTS_FOR_AGGREGATE, IMPROVE_PATIENCE, MAX_STEPS_DEFAULT)
 from ..history import CandidateRecord, HistoryStore, RoundRecord
 from ..metrics import (aggregate_event_metrics, compute_event_metrics,
-                       read_metrics_from_csv)
+                       read_metrics_for_period, read_metrics_from_csv)
 from ..parameters import ParameterSet
 from ..peak_events import pick_peak_events
 from ..plotting import plot_event_windows, plot_hydrograph_with_precipitation
@@ -37,6 +38,19 @@ class CandidateOutcome:
     event_figures: List[str] = field(default_factory=list)
 
 
+@dataclass
+class TestConfig:
+    enabled: bool
+    warmup_begin: str
+    warmup_end: str
+    warmup_state: str
+    time_begin: str
+    time_end: str
+    timestep: str
+    eval_start: str
+    eval_end: str
+
+
 class TwoStageCalibrationManager:
     def __init__(self,
                  args_obj,
@@ -47,7 +61,8 @@ class TwoStageCalibrationManager:
                  include_max_event_images: int = 3,
                  peak_pick_kwargs: Optional[Dict] = None,
                  history_path: Optional[str] = None,
-                 max_workers: Optional[int] = None):
+                 max_workers: Optional[int] = None,
+                 test_config: Optional[TestConfig] = None):
         self.args_obj = args_obj
         self.current_params = ParameterSet.from_object(args_obj)
         self.runner = SimulationRunner(simu_folder=simu_folder, gauge_num=gauge_num)
@@ -63,6 +78,7 @@ class TwoStageCalibrationManager:
         self.round_index = 0
         self.stall = 0
         self.max_workers = max_workers
+        self.test_config = test_config
 
     def initialize_baseline(self) -> None:
         print("[Init] Running baseline simulation…")
@@ -97,6 +113,85 @@ class TwoStageCalibrationManager:
         aggregate = aggregate_event_metrics(event_metrics, top_n=self.n_peaks)
         full_metrics = read_metrics_from_csv(result.csv_path)
         return CandidateOutcome(result, result.params, windows, event_metrics, aggregate, full_metrics)
+
+    def _run_test_suite(self, params: Sequence[ParameterSet], round_index: int) -> Dict[int, Dict[str, Any]]:
+        if not self.test_config or not self.test_config.enabled:
+            return {}
+
+        print(f"[Round {round_index}] Starting test suite for {len(params)} candidates…")
+        overrides = {
+            "TIME_STATE": self.test_config.warmup_state,
+            "WARMUP_TIME_BEGIN": self.test_config.warmup_begin,
+            "WARMUP_TIME_END": self.test_config.warmup_end,
+            "TIME_BEGIN": self.test_config.time_begin,
+            "TIME_END": self.test_config.time_end,
+            "TIMESTEP": self.test_config.timestep,
+        }
+
+        summaries: Dict[int, Dict[str, Any]] = {}
+        for idx, param_set in enumerate(params):
+            result = self.runner.run_with_overrides(
+                param_set,
+                round_index=round_index,
+                candidate_index=idx,
+                subfolder="test",
+                states_dir=None,
+                scalar_overrides=overrides,
+            )
+            metrics = read_metrics_for_period(
+                result.csv_path,
+                start=self.test_config.eval_start,
+                end=self.test_config.eval_end,
+            )
+            summary = {
+                "round_index": round_index,
+                "candidate_index": idx,
+                "params": param_set.values.copy(),
+                "csv": result.csv_path,
+                "metrics": metrics,
+            }
+            summaries[idx] = summary
+            summary_path = Path(result.output_dir) / "summary.json"
+            summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2))
+
+            print(
+                f"    [Round {round_index} Test {idx}] NSE={metrics.get('NSE', float('nan')):.3f} "
+                f"CC={metrics.get('CC', float('nan')):.3f} KGE={metrics.get('KGE', float('nan')):.3f}"
+            )
+
+        print(f"[Round {round_index}] Test suite finished.")
+        return summaries
+
+    def _request_candidates(self, context: RoundContext, round_index: int):
+        print(f"[Round {round_index}] Requesting {self.n_candidates} proposals from proposal agent…")
+        proposals = self.proposal_agent.propose(context, self.n_candidates)
+        proposal_params = self.proposal_agent.apply_candidates(self.best_outcome.params, proposals)
+        print(f"[Round {round_index}] Initial proposals and parameter sets:")
+        for idx, (proposal, params) in enumerate(zip(proposals, proposal_params)):
+            goal = proposal.get("goal") or proposal.get("id") or f"cand_{idx}"
+            print(
+                f"    [Proposal {idx}] goal={goal} updates={proposal.get('updates', {})} "
+                f"→ params={params.values}"
+            )
+
+        refined_candidates, eval_meta = self.evaluation_agent.refine(
+            context,
+            proposals,
+            self._history_payload(),
+            self.n_candidates,
+        )
+        refined_params = self.evaluation_agent.apply_candidates(self.best_outcome.params, refined_candidates)
+        if not refined_params:
+            refined_candidates = proposals
+            refined_params = proposal_params
+        print(f"[Round {round_index}] Evaluation agent refined parameter sets:")
+        for idx, (candidate, params) in enumerate(zip(refined_candidates, refined_params)):
+            goal = candidate.get("goal") or candidate.get("id") or f"cand_{idx}"
+            print(
+                f"    [Refined {idx}] goal={goal} updates={candidate.get('updates', {})} "
+                f"→ params={params.values}"
+            )
+        return proposals, refined_candidates, refined_params, eval_meta
 
     def _ensure_plots(self, outcome: CandidateOutcome) -> None:
         hydrograph_missing = not outcome.hydrograph_path or not Path(outcome.hydrograph_path).exists()
@@ -258,37 +353,12 @@ class TwoStageCalibrationManager:
     def run(self, max_rounds: int = MAX_STEPS_DEFAULT) -> None:
         if self.best_outcome is None:
             self.initialize_baseline()
+        # Prime the first batch of candidates
+        initial_context = self._build_context()
+        proposals, refined_candidates, refined_params, eval_meta = self._request_candidates(initial_context, 1)
+
         for r in range(1, max_rounds + 1):
             self.round_index = r
-            context = self._build_context()
-            print(f"[Round {r}] Requesting {self.n_candidates} proposals from proposal agent…")
-            proposals = self.proposal_agent.propose(context, self.n_candidates)
-            proposal_params = self.proposal_agent.apply_candidates(self.best_outcome.params, proposals)
-            print(f"[Round {r}] Initial proposals and parameter sets:")
-            for idx, (proposal, params) in enumerate(zip(proposals, proposal_params)):
-                goal = proposal.get("goal") or proposal.get("id") or f"cand_{idx}"
-                print(
-                    f"    [Proposal {idx}] goal={goal} updates={proposal.get('updates', {})} "
-                    f"→ params={params.values}"
-                )
-
-            refined_candidates, eval_meta = self.evaluation_agent.refine(
-                context,
-                proposals,
-                self._history_payload(),
-                self.n_candidates,
-            )
-            refined_params = self.evaluation_agent.apply_candidates(self.best_outcome.params, refined_candidates)
-            if not refined_params:
-                refined_candidates = proposals
-                refined_params = proposal_params
-            print(f"[Round {r}] Evaluation agent refined parameter sets:")
-            for idx, (candidate, params) in enumerate(zip(refined_candidates, refined_params)):
-                goal = candidate.get("goal") or candidate.get("id") or f"cand_{idx}"
-                print(
-                    f"    [Refined {idx}] goal={goal} updates={candidate.get('updates', {})} "
-                    f"→ params={params.values}"
-                )
 
             print(
                 f"[Round {r}] Launching {len(refined_params)} simulations (max_workers={self.max_workers or 'auto'})…"
@@ -296,8 +366,8 @@ class TwoStageCalibrationManager:
             results = run_simulations_parallel(
                 self.runner,
                 refined_params,
-                round_index=r,
-                max_workers=self.max_workers,
+                r,
+                self.max_workers,
             )
             outcomes = [self._process_result(res) for res in results]
 
@@ -369,7 +439,39 @@ class TwoStageCalibrationManager:
                 f"full KGE={full.get('KGE', float('nan')):.3f}"
             )
 
+            # Kick off test and next-round proposal requests in parallel and wait
+            next_proposals = None
+            next_refined = None
+            next_params = None
+            next_eval_meta = {}
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = {}
+                if self.test_config and self.test_config.enabled:
+                    futures["test"] = executor.submit(self._run_test_suite, refined_params, r)
+                if r < max_rounds:
+                    next_context = self._build_context()
+                    futures["proposal"] = executor.submit(
+                        self._request_candidates, next_context, r + 1
+                    )
+
+                test_summaries = {}
+                for key, future in futures.items():
+                    if key == "test":
+                        test_summaries = future.result()
+                        print(f"[Round {r}] Test summaries written for {len(test_summaries)} candidates.")
+                    elif key == "proposal":
+                        (next_proposals, next_refined, next_params, next_eval_meta) = future.result()
+
             if r >= IMPROVE_PATIENCE:
+                break
+
+            if next_params is not None:
+                proposals = next_proposals
+                refined_candidates = next_refined
+                refined_params = next_params
+                eval_meta = next_eval_meta
+            else:
                 break
 
     def _update_metric_bests(self,
