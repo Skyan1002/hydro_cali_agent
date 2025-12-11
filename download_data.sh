@@ -12,10 +12,10 @@ wget -O data.tar "https://sooners-my.sharepoint.com/:u:/g/personal/skyan_ou_edu/
 tar -xf data.tar
 
 # 2) Second tar
-wget -O data.tar "https://sooners-my.sharepoint.com/:u:/g/personal/skyan_ou_edu/EemEeQkEU5VIuRTidozT4xIBRrSyql21FdFIYj3HE1BvUg?download=1"
+wget -O data.tar "https://sooners-my.sharepoint.com/:u:/g/personal/skyan_ou_edu/IQAjMW1JRz7IQYxEttRw83M7Aaxn261mj6vSB-HZ_2LLpQ4?download=1"
 tar -xf data.tar
 
-# 3) Third tar
+# 3) Third tar (MRMS_precip with 2017–2019)
 wget -O data.tar "https://sooners-my.sharepoint.com/:u:/g/personal/skyan_ou_edu/EUNsMkszegBHlFDcdPHVI5oB7p2eGVeRnvr-iK2Y_RTsMw?download=1"
 tar -xf data.tar
 
