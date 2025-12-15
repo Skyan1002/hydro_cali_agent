@@ -7,15 +7,15 @@ set -e  # Exit immediately if a command exits with a non-zero status
 mkdir -p data_cali
 cd data_cali
 
-# 1) First tar
+# 1) First tar (basic data)
 wget -O data.tar "https://sooners-my.sharepoint.com/:u:/g/personal/skyan_ou_edu/ERdAMAIviDBBnbK-JBViVjsBSg-Vq4hsiq8_bmhEATVo2w?download=1"
 tar -xf data.tar
 
-# 2) Second tar
-wget -O data.tar "https://sooners-my.sharepoint.com/:u:/g/personal/skyan_ou_edu/EemEeQkEU5VIuRTidozT4xIBRrSyql21FdFIYj3HE1BvUg?download=1"
+# 2) Second tar (MRMS precipitation)
+wget -O data.tar "https://sooners-my.sharepoint.com/:u:/g/personal/skyan_ou_edu/IQAjMW1JRz7IQYxEttRw83M7Aaxn261mj6vSB-HZ_2LLpQ4?download=1"
 tar -xf data.tar
 
-# 3) Third tar
+# 3) Third tar (PET)
 wget -O data.tar "https://sooners-my.sharepoint.com/:u:/g/personal/skyan_ou_edu/EUNsMkszegBHlFDcdPHVI5oB7p2eGVeRnvr-iK2Y_RTsMw?download=1"
 tar -xf data.tar
 
