@@ -370,6 +370,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--n_candidates", type=int, default=8)
     p.add_argument("--n_peaks", type=int, default=3)
     p.add_argument("--max_rounds", type=int, default=20)
+    p.add_argument("--objective", choices=["nse_event", "nse_full", "score"], default="nse_event",
+                   help="Objective for selecting the best candidate. Default uses aggregated event NSE.")
+    p.add_argument("--physics_information", dest="physics_information", action="store_true", default=True,
+                   help="If true, include physical parameter guidance and real parameter names in prompts.")
+    p.add_argument("--no-physics_information", dest="physics_information", action="store_false",
+                   help="Disable physics-aware guidance and anonymize parameter names in prompts.")
+    p.add_argument("--image_input", dest="image_input", action="store_true", default=True,
+                   help="If true, share hydrograph/peak images with the LLM agents.")
+    p.add_argument("--no-image_input", dest="image_input", action="store_false",
+                   help="Disable image sharing with the LLM agents.")
 
     return p.parse_args()
 
@@ -682,6 +692,9 @@ def main():
         n_candidates=args.n_candidates,
         n_peaks=args.n_peaks,
         test_config=test_config,
+        objective=args.objective,
+        physics_information=args.physics_information,
+        image_input=args.image_input,
     )
     print(f"[INFO] Starting calibration (max_rounds={args.max_rounds}) ...")
     calib.run(max_rounds=args.max_rounds)

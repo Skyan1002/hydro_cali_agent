@@ -18,6 +18,12 @@ from ..history import CandidateRecord, HistoryStore, RoundRecord
 from ..metrics import (aggregate_event_metrics, compute_event_metrics,
                        read_metrics_for_period, read_metrics_from_csv)
 from ..parameters import ParameterSet
+from .physics_info import (
+    build_display_name_map,
+    display_parameters,
+    invert_display_map,
+    render_parameter_guide,
+)
 from ..peak_events import pick_peak_events
 from ..plotting import plot_event_windows, plot_hydrograph_with_precipitation
 from ..simulation import SimulationResult, SimulationRunner, run_simulations_parallel
@@ -62,12 +68,24 @@ class TwoStageCalibrationManager:
                  peak_pick_kwargs: Optional[Dict] = None,
                  history_path: Optional[str] = None,
                  max_workers: Optional[int] = None,
-                 test_config: Optional[TestConfig] = None):
+                 test_config: Optional[TestConfig] = None,
+                 objective: str = "nse_event",
+                 physics_information: bool = True,
+                 image_input: bool = True):
         self.args_obj = args_obj
         self.current_params = ParameterSet.from_object(args_obj)
         self.runner = SimulationRunner(simu_folder=simu_folder, gauge_num=gauge_num)
-        self.proposal_agent = ProposalAgent()
-        self.evaluation_agent = EvaluationAgent()
+        self.display_name_map = build_display_name_map(physics_information)
+        self.reverse_display_map = invert_display_map(self.display_name_map)
+        self.physics_prompt = render_parameter_guide(physics_information, self.display_name_map)
+        self.proposal_agent = ProposalAgent(
+            physics_information=physics_information,
+            display_name_map=self.display_name_map,
+        )
+        self.evaluation_agent = EvaluationAgent(
+            physics_information=physics_information,
+            display_name_map=self.display_name_map,
+        )
         self.n_candidates = n_candidates
         self.n_peaks = n_peaks
         self.include_max_event_images = include_max_event_images
@@ -79,6 +97,9 @@ class TwoStageCalibrationManager:
         self.stall = 0
         self.max_workers = max_workers
         self.test_config = test_config
+        self.objective = objective
+        self.physics_information = physics_information
+        self.image_input = image_input
 
     def initialize_baseline(self) -> None:
         print("[Init] Running baseline simulation…")
@@ -273,18 +294,29 @@ class TwoStageCalibrationManager:
         assert self.best_outcome is not None
         description = "Top candidate metrics averaged across selected events."
         images = []
-        if self.best_outcome.hydrograph_path:
-            images.append(self.best_outcome.hydrograph_path)
-        images.extend(self.best_outcome.event_figures[:self.include_max_event_images])
+        if self.image_input:
+            if self.best_outcome.hydrograph_path:
+                images.append(self.best_outcome.hydrograph_path)
+            images.extend(self.best_outcome.event_figures[: self.include_max_event_images])
+        display_params = display_parameters(self.best_outcome.params.values, self.display_name_map)
+        prompt_param_names = (
+            self.display_name_map
+            if self.physics_information
+            else {v: v for v in self.display_name_map.values()}
+        )
         return RoundContext(
             round_index=self.round_index,
             params=self.best_outcome.params.values.copy(),
+            display_params=display_params,
+            param_display_names=prompt_param_names,
             aggregate_metrics=self.best_outcome.aggregate_metrics,
             full_metrics=self.best_outcome.full_metrics,
             event_metrics=self.best_outcome.event_metrics[: self.n_peaks],
             history_summary=self._history_summary(),
             description=description,
             images=images,
+            physics_information=self.physics_information,
+            physics_prompt=self.physics_prompt,
         )
 
     def _history_payload(self) -> Dict[str, Any]:
@@ -312,9 +344,21 @@ class TwoStageCalibrationManager:
             score -= 0.1 * abs(math.log(peak_ratio))
         return score
 
+    def _objective_value(self, aggregate: Dict[str, float], full: Dict[str, float]) -> float:
+        if self.objective == "score":
+            return self._candidate_score(aggregate, full)
+
+        if self.objective == "nse_full":
+            value = full.get("NSE", float("nan"))
+        else:
+            value = aggregate.get("NSE", float("nan"))
+
+        return value if np.isfinite(value) else float("-inf")
+
     def _collect_round_bests(self, outcomes: Sequence[CandidateOutcome]) -> Dict[str, Dict[str, Any]]:
         metric_extractors = {
             "score": lambda outcome: self._candidate_score(outcome.aggregate_metrics, outcome.full_metrics),
+            "objective": lambda outcome: self._objective_value(outcome.aggregate_metrics, outcome.full_metrics),
             "full_nse": lambda outcome: outcome.full_metrics.get("NSE", float("nan")),
             "full_cc": lambda outcome: outcome.full_metrics.get("CC", float("nan")),
             "full_kge": lambda outcome: outcome.full_metrics.get("KGE", float("nan")),
@@ -344,7 +388,7 @@ class TwoStageCalibrationManager:
         best_idx = -1
         best_score = -math.inf
         for idx, outcome in enumerate(outcomes):
-            score = self._candidate_score(outcome.aggregate_metrics, outcome.full_metrics)
+            score = self._objective_value(outcome.aggregate_metrics, outcome.full_metrics)
             if score > best_score:
                 best_idx = idx
                 best_score = score
@@ -376,9 +420,11 @@ class TwoStageCalibrationManager:
                 agg = outcome.aggregate_metrics
                 full = outcome.full_metrics
                 score = self._candidate_score(agg, full)
+                objective_value = self._objective_value(agg, full)
                 print(
                     f"    [Cand {outcome.simulation.candidate_index}] "
-                    f"score={score:.3f} | event NSE={agg.get('NSE', float('nan')):.3f} "
+                    f"objective({self.objective})={objective_value:.3f} | score={score:.3f} | "
+                    f"event NSE={agg.get('NSE', float('nan')):.3f} "
                     f"CC={agg.get('CC', float('nan')):.3f} KGE={agg.get('KGE', float('nan')):.3f} "
                     f"lag={agg.get('lag_hours', float('nan')):.2f}h | "
                     f"full NSE={full.get('NSE', float('nan')):.3f} CC={full.get('CC', float('nan')):.3f} "
@@ -429,8 +475,10 @@ class TwoStageCalibrationManager:
 
             agg = best_outcome.aggregate_metrics
             full = best_outcome.full_metrics
+            objective_value = self._objective_value(agg, full)
             print(
                 f"[Round {r}] Best candidate {best_outcome.simulation.candidate_index}: "
+                f"objective({self.objective})={objective_value:.3f} | "
                 f"event NSE={agg.get('NSE', float('nan')):.3f} "
                 f"event CC={agg.get('CC', float('nan')):.3f} "
                 f"event KGE={agg.get('KGE', float('nan')):.3f} | "
@@ -517,6 +565,23 @@ class TwoStageCalibrationManager:
                         subfolder=f"best_{key}",
                         metadata={"criterion": key, "criterion_value": value},
                     )
+
+            objective_value = self._objective_value(agg, full)
+            if self.history.update_best_metric(
+                key="objective",
+                value=objective_value,
+                aggregate_metrics=agg,
+                full_metrics=full,
+                params=outcome.params.values.copy(),
+                round_index=round_index,
+                candidate_index=outcome.simulation.candidate_index,
+            ):
+                self._ensure_plots(outcome)
+                self._publish_best(
+                    outcome,
+                    subfolder=f"best_objective_{self.objective}",
+                    metadata={"criterion": self.objective, "criterion_value": objective_value},
+                )
 
 
 __all__ = ["TwoStageCalibrationManager", "CandidateOutcome"]
