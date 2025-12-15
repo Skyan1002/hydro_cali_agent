@@ -71,7 +71,8 @@ class TwoStageCalibrationManager:
                  test_config: Optional[TestConfig] = None,
                  objective: str = "nse_event",
                  physics_information: bool = True,
-                 image_input: bool = True):
+                 image_input: bool = True,
+                 detail_output: bool = False):
         self.args_obj = args_obj
         self.current_params = ParameterSet.from_object(args_obj)
         self.runner = SimulationRunner(simu_folder=simu_folder, gauge_num=gauge_num)
@@ -81,10 +82,12 @@ class TwoStageCalibrationManager:
         self.proposal_agent = ProposalAgent(
             physics_information=physics_information,
             display_name_map=self.display_name_map,
+            detail_output=detail_output,
         )
         self.evaluation_agent = EvaluationAgent(
             physics_information=physics_information,
             display_name_map=self.display_name_map,
+            detail_output=detail_output,
         )
         self.n_candidates = n_candidates
         self.n_peaks = n_peaks
@@ -100,6 +103,8 @@ class TwoStageCalibrationManager:
         self.objective = objective
         self.physics_information = physics_information
         self.image_input = image_input
+        self.detail_output = detail_output
+        self.detail_dir = Path(simu_folder) / "results" / "detail_logs"
 
     def initialize_baseline(self) -> None:
         print("[Init] Running baseline simulation…")
@@ -185,7 +190,14 @@ class TwoStageCalibrationManager:
 
     def _request_candidates(self, context: RoundContext, round_index: int):
         print(f"[Round {round_index}] Requesting {self.n_candidates} proposals from proposal agent…")
-        proposals = self.proposal_agent.propose(context, self.n_candidates)
+        proposal_log = None
+        proposals_result = self.proposal_agent.propose(
+            context, self.n_candidates, return_log=self.detail_output
+        )
+        if self.detail_output:
+            proposals, proposal_log = proposals_result
+        else:
+            proposals = proposals_result
         proposal_params = self.proposal_agent.apply_candidates(self.best_outcome.params, proposals)
         print(f"[Round {round_index}] Initial proposals and parameter sets:")
         for idx, (proposal, params) in enumerate(zip(proposals, proposal_params)):
@@ -195,11 +207,12 @@ class TwoStageCalibrationManager:
                 f"→ params={params.values}"
             )
 
-        refined_candidates, eval_meta = self.evaluation_agent.refine(
+        refined_candidates, eval_meta, eval_log = self.evaluation_agent.refine(
             context,
             proposals,
             self._history_payload(),
             self.n_candidates,
+            return_log=self.detail_output,
         )
         refined_params = self.evaluation_agent.apply_candidates(self.best_outcome.params, refined_candidates)
         if not refined_params:
@@ -212,6 +225,10 @@ class TwoStageCalibrationManager:
                 f"    [Refined {idx}] goal={goal} updates={candidate.get('updates', {})} "
                 f"→ params={params.values}"
             )
+        if proposal_log:
+            self._log_detail("proposal", round_index, proposal_log)
+        if eval_log:
+            self._log_detail("evaluation", round_index, eval_log)
         return proposals, refined_candidates, refined_params, eval_meta
 
     def _ensure_plots(self, outcome: CandidateOutcome) -> None:
@@ -322,6 +339,14 @@ class TwoStageCalibrationManager:
     def _history_payload(self) -> Dict[str, Any]:
         return json.loads(self.history.path.read_text()) if self.history.path.exists() else {}
 
+    def _log_detail(self, stage: str, round_index: int, payload: Dict[str, Any]) -> None:
+        if not self.detail_output:
+            return
+        out_dir = self.detail_dir / f"round_{round_index:02d}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        target = out_dir / f"{stage}.json"
+        target.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+
     def _candidate_score(self, aggregate: Dict[str, float], full: Dict[str, float]) -> float:
         nse = aggregate.get("NSE", float("nan"))
         if not np.isfinite(nse):
@@ -395,6 +420,8 @@ class TwoStageCalibrationManager:
         return best_idx if best_idx != -1 else 0
 
     def run(self, max_rounds: int = MAX_STEPS_DEFAULT) -> None:
+        if self.detail_output:
+            print(f"[Debug] Writing detailed agent I/O to {self.detail_dir}.")
         if self.best_outcome is None:
             self.initialize_baseline()
         # Prime the first batch of candidates

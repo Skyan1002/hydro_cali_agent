@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .physics_info import (
@@ -11,7 +12,13 @@ from .physics_info import (
     translate_updates,
 )
 from .types import RoundContext
-from .utils import b64_image, coerce_updates, extract_json_block, get_client
+from .utils import (
+    b64_image,
+    coerce_updates,
+    extract_json_block,
+    get_client,
+    redact_history_block,
+)
 from ..config import LLM_MODEL_DEFAULT
 from ..parameters import ParameterSet
 
@@ -29,12 +36,14 @@ class ProposalAgent:
     def __init__(self,
                  model: str = LLM_MODEL_DEFAULT,
                  physics_information: bool = True,
-                 display_name_map: Optional[Dict[str, str]] = None):
+                 display_name_map: Optional[Dict[str, str]] = None,
+                 detail_output: bool = False):
         self.model = model
         self.client = get_client()
         self.physics_information = physics_information
         self.display_name_map = display_name_map or {}
         self.reverse_display_map = {v: k for k, v in self.display_name_map.items()}
+        self.detail_output = detail_output
         frozen_names = frozen_display_names(self.display_name_map)
         frozen_text = ", ".join(frozen_names) if frozen_names else ""
         self.system_prompt = (
@@ -60,7 +69,7 @@ class ProposalAgent:
         }
         return json.dumps(payload, ensure_ascii=False, indent=2)
 
-    def propose(self, context: RoundContext, k: int) -> List[Dict[str, Any]]:
+    def propose(self, context: RoundContext, k: int, return_log: bool = False):
         user_prompt = self.build_prompt(context, k)
         if context.images:
             content = [{"type": "text", "text": user_prompt}]
@@ -81,7 +90,19 @@ class ProposalAgent:
         raw = response.choices[0].message.content
         data = extract_json_block(raw)
         candidates = data.get("candidates", [])[:k]
-        return candidates
+        if not return_log:
+            return candidates
+
+        log_payload = {
+            "stage": "proposal",
+            "round": context.round_index,
+            "system_prompt": self.system_prompt,
+            "user_prompt": redact_history_block(user_prompt),
+            "input_files": [Path(img).name for img in context.images],
+            "output_text": raw,
+            "parsed_output": data,
+        }
+        return candidates, log_payload
 
     def apply_candidates(self, base_params: ParameterSet, candidates: List[Dict[str, Any]]) -> List[ParameterSet]:
         param_sets: List[ParameterSet] = []

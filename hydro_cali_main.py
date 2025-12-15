@@ -376,6 +376,8 @@ def parse_args() -> argparse.Namespace:
                    help="If set, disable physics-aware guidance and anonymize parameter names in prompts.")
     p.add_argument("--image_input_off", action="store_true", default=False,
                    help="If set, disable image sharing with the LLM agents.")
+    p.add_argument("--detail_output", action="store_true", default=False,
+                   help="If set, write detailed prompts, inputs, and LLM outputs for each round.")
 
     return p.parse_args()
 
@@ -691,6 +693,7 @@ def main():
         objective=args.objective,
         physics_information=not args.physics_information_off,
         image_input=not args.image_input_off,
+        detail_output=args.detail_output,
     )
     print(f"[INFO] Starting calibration (max_rounds={args.max_rounds}) ...")
     calib.run(max_rounds=args.max_rounds)

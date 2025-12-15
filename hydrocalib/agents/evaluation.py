@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .physics_info import render_parameter_guide, translate_updates
 from .types import RoundContext
-from .utils import b64_image, coerce_updates, extract_json_block, get_client
+from .utils import (
+    b64_image,
+    coerce_updates,
+    extract_json_block,
+    get_client,
+    redact_history_block,
+)
 from ..config import LLM_MODEL_REASONING
 from ..parameters import ParameterSet
 
@@ -28,12 +35,14 @@ class EvaluationAgent:
     def __init__(self,
                  model: str = LLM_MODEL_REASONING,
                  physics_information: bool = True,
-                 display_name_map: Optional[Dict[str, str]] = None):
+                 display_name_map: Optional[Dict[str, str]] = None,
+                 detail_output: bool = False):
         self.model = model
         self.client = get_client()
         self.physics_information = physics_information
         self.display_name_map = display_name_map or {}
         self.reverse_display_map = {v: k for k, v in self.display_name_map.items()}
+        self.detail_output = detail_output
         self.system_prompt = (
             BASE_EVALUATION_SYSTEM_PROMPT
             + "\n"
@@ -65,7 +74,8 @@ class EvaluationAgent:
                context: RoundContext,
                proposals: List[Dict[str, Any]],
                history_payload: Dict[str, Any],
-               k: int) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+               k: int,
+               return_log: bool = False) -> tuple[List[Dict[str, Any]], Dict[str, Any], Optional[Dict[str, Any]]]:
         user_prompt = self.build_prompt(context, proposals, history_payload, k)
         if context.images:
             content = [{"type": "text", "text": user_prompt}]
@@ -91,7 +101,19 @@ class EvaluationAgent:
             "risk": data.get("risk", ""),
             "focus": data.get("focus", ""),
         }
-        return refined, meta
+        log_payload = None
+        if return_log:
+            log_payload = {
+                "stage": "evaluation",
+                "round": context.round_index,
+                "system_prompt": self.system_prompt,
+                "user_prompt": redact_history_block(user_prompt),
+                "input_files": [Path(img).name for img in context.images],
+                "output_text": raw,
+                "parsed_output": data,
+            }
+
+        return refined, meta, log_payload
 
     def apply_candidates(self, base_params: ParameterSet, refined: List[Dict[str, Any]]) -> List[ParameterSet]:
         param_sets: List[ParameterSet] = []
