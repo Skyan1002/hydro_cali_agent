@@ -30,6 +30,19 @@ def extract_json_block(text: str) -> Dict[str, Any]:
     return json.loads(match.group(0))
 
 
+def redact_history_block(prompt_text: str) -> str:
+    """Remove bulky history payloads from a JSON prompt before logging."""
+
+    try:
+        payload = json.loads(prompt_text)
+    except Exception:
+        return prompt_text
+
+    if "history_payload" in payload:
+        payload["history_payload"] = "[omitted]"
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
 def coerce_updates(params: ParameterSet, updates: Dict[str, Any]) -> ParameterSet:
     new_vals = params.values.copy()
     for name, spec in updates.items():
@@ -60,4 +73,10 @@ def b64_image(path: str) -> str:
     return base64.b64encode(data).decode("utf-8")
 
 
-__all__ = ["get_client", "extract_json_block", "coerce_updates", "b64_image"]
+__all__ = [
+    "get_client",
+    "extract_json_block",
+    "coerce_updates",
+    "b64_image",
+    "redact_history_block",
+]
