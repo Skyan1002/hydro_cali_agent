@@ -346,6 +346,10 @@ class TwoStageCalibrationManager:
         out_dir.mkdir(parents=True, exist_ok=True)
         target = out_dir / f"{stage}.json"
         target.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+        print(f"[Detail] Saved {stage} log for round {round_index} to {target}.")
+        prompt_text = payload.get("user_prompt")
+        if prompt_text:
+            print(f"[Detail] {stage.capitalize()} prompt (round {round_index}):\n{prompt_text}")
 
     def _candidate_score(self, aggregate: Dict[str, float], full: Dict[str, float]) -> float:
         nse = aggregate.get("NSE", float("nan"))
