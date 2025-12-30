@@ -67,6 +67,7 @@ class TwoStageCalibrationManager:
                  include_max_event_images: int = 3,
                  peak_pick_kwargs: Optional[Dict] = None,
                  history_path: Optional[str] = None,
+                  memory_cutoff: Optional[int] = None,
                  max_workers: Optional[int] = None,
                  test_config: Optional[TestConfig] = None,
                  objective: str = "nse_event",
@@ -95,6 +96,7 @@ class TwoStageCalibrationManager:
         self.peak_pick_kwargs = peak_pick_kwargs or DEFAULT_PEAK_PICK_KWARGS
         hist_path = history_path or (Path(simu_folder) / "results" / "calibration_history.json")
         self.history = HistoryStore(Path(hist_path))
+        self.memory_cutoff = memory_cutoff if memory_cutoff is not None and memory_cutoff >= 0 else None
         self.best_outcome: Optional[CandidateOutcome] = None
         self.round_index = 0
         self.stall = 0
@@ -293,7 +295,10 @@ class TwoStageCalibrationManager:
     def _history_summary(self, last_k: int = 3) -> str:
         if not self.history.rounds:
             return "No prior rounds."
-        tail = self.history.rounds[-last_k:]
+        limit = self.memory_cutoff if self.memory_cutoff is not None else last_k
+        if limit == 0:
+            return "No prior rounds."
+        tail = self.history.rounds[-limit:] if limit else self.history.rounds
         parts = []
         for round_record in tail:
             best = next((c for c in round_record.candidates if c.candidate_index == round_record.best_candidate_index), None)
@@ -337,7 +342,17 @@ class TwoStageCalibrationManager:
         )
 
     def _history_payload(self) -> Dict[str, Any]:
-        return json.loads(self.history.path.read_text()) if self.history.path.exists() else {}
+        if not self.history.path.exists():
+            return {}
+        payload = json.loads(self.history.path.read_text())
+        if self.memory_cutoff is not None and isinstance(payload.get("rounds"), list):
+            if self.memory_cutoff == 0:
+                payload["rounds"] = []
+            else:
+                rounds = payload["rounds"]
+                if len(rounds) > self.memory_cutoff:
+                    payload["rounds"] = rounds[-self.memory_cutoff:]
+        return payload
 
     def _log_detail(self, stage: str, round_index: int, payload: Dict[str, Any]) -> None:
         if not self.detail_output:
