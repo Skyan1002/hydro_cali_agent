@@ -97,7 +97,7 @@ class TwoStageCalibrationManager:
         hist_path = history_path or (Path(simu_folder) / "results" / "calibration_history.json")
         self.history = HistoryStore(Path(hist_path))
         if memory_cutoff is not None and memory_cutoff < 0:
-            raise ValueError("memory_cutoff must be non-negative")
+            raise ValueError("memory_cutoff must be non-negative (>= 0)")
         self.memory_cutoff = memory_cutoff
         self.best_outcome: Optional[CandidateOutcome] = None
         self.round_index = 0
@@ -295,15 +295,21 @@ class TwoStageCalibrationManager:
         }
 
     def _history_limit(self, default: int) -> int:
+        """Return the effective history window, falling back to ``default`` when unset."""
         return self.memory_cutoff if self.memory_cutoff is not None else default
 
-    def _history_summary(self, last_k: int = 3) -> str:
-        if not self.history.rounds:
-            return "No prior rounds."
-        limit = self._history_limit(last_k)
+    def _apply_history_limit(self, items: List[Any], default: int) -> List[Any]:
+        limit = self._history_limit(default)
         if limit == 0:
+            return []
+        if limit >= len(items):
+            return list(items)
+        return list(items[-limit:])
+
+    def _history_summary(self, last_k: int = 3) -> str:
+        tail = self._apply_history_limit(self.history.rounds, last_k)
+        if not tail:
             return "No prior rounds."
-        tail = self.history.rounds[-limit:]
         parts = []
         for round_record in tail:
             best = next((c for c in round_record.candidates if c.candidate_index == round_record.best_candidate_index), None)
@@ -352,11 +358,7 @@ class TwoStageCalibrationManager:
         payload = json.loads(self.history.path.read_text())
         rounds = payload.get("rounds")
         if isinstance(rounds, list):
-            limit = self._history_limit(len(rounds))
-            if limit == 0:
-                payload["rounds"] = []
-            elif len(rounds) > limit:
-                payload["rounds"] = rounds[-limit:]
+            payload["rounds"] = self._apply_history_limit(rounds, len(rounds))
         return payload
 
     def _log_detail(self, stage: str, round_index: int, payload: Dict[str, Any]) -> None:
