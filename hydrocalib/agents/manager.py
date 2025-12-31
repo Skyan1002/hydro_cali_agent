@@ -67,6 +67,7 @@ class TwoStageCalibrationManager:
                  include_max_event_images: int = 3,
                  peak_pick_kwargs: Optional[Dict] = None,
                  history_path: Optional[str] = None,
+                 memory_cutoff: Optional[int] = None,
                  max_workers: Optional[int] = None,
                  test_config: Optional[TestConfig] = None,
                  objective: str = "nse_event",
@@ -95,6 +96,9 @@ class TwoStageCalibrationManager:
         self.peak_pick_kwargs = peak_pick_kwargs or DEFAULT_PEAK_PICK_KWARGS
         hist_path = history_path or (Path(simu_folder) / "results" / "calibration_history.json")
         self.history = HistoryStore(Path(hist_path))
+        if memory_cutoff is not None and memory_cutoff < 0:
+            raise ValueError("memory_cutoff must be non-negative (>= 0)")
+        self.memory_cutoff = memory_cutoff
         self.best_outcome: Optional[CandidateOutcome] = None
         self.round_index = 0
         self.stall = 0
@@ -290,10 +294,22 @@ class TwoStageCalibrationManager:
             "event_figures": outcome.event_figures[: self.include_max_event_images],
         }
 
+    def _history_limit(self, default: int) -> int:
+        """Return the configured memory_cutoff when set, otherwise the provided default."""
+        return self.memory_cutoff if self.memory_cutoff is not None else default
+
+    def _apply_history_limit(self, items: List[Any], default: Optional[int] = None) -> List[Any]:
+        """Trim a sequence of history entries using the configured cutoff or the provided default."""
+        effective_default = default if default is not None else len(items)
+        limit = self._history_limit(effective_default)
+        if limit == 0:
+            return []
+        return items[-limit:]
+
     def _history_summary(self, last_k: int = 3) -> str:
-        if not self.history.rounds:
+        tail = self._apply_history_limit(self.history.rounds, last_k)
+        if not tail:
             return "No prior rounds."
-        tail = self.history.rounds[-last_k:]
         parts = []
         for round_record in tail:
             best = next((c for c in round_record.candidates if c.candidate_index == round_record.best_candidate_index), None)
@@ -337,7 +353,13 @@ class TwoStageCalibrationManager:
         )
 
     def _history_payload(self) -> Dict[str, Any]:
-        return json.loads(self.history.path.read_text()) if self.history.path.exists() else {}
+        if not self.history.path.exists():
+            return {}
+        payload = json.loads(self.history.path.read_text())
+        rounds = payload.get("rounds")
+        if isinstance(rounds, list):
+            payload["rounds"] = self._apply_history_limit(rounds)
+        return payload
 
     def _log_detail(self, stage: str, round_index: int, payload: Dict[str, Any]) -> None:
         if not self.detail_output:

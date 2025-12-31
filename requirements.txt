@@ -10,8 +10,9 @@ requests
 dataretrieval
 rasterio
 tqdm
-gdal
+gdal==3.4.1
 
 # LLM agent tooling
 openai
 python-dotenv
+

@@ -372,6 +372,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max_rounds", type=int, default=20)
     p.add_argument("--objective", choices=["nse_event", "nse_full", "score"], default="nse_event",
                    help="Objective for selecting the best candidate. Default uses aggregated event NSE.")
+    p.add_argument("--memory-cutoff", dest="memory_cutoff", type=int, default=None,
+                   help="Limit history shared with LLM agents to the most recent N rounds to reduce context size.")
     p.add_argument("--physics_information_off", action="store_true", default=False,
                    help="If set, disable physics-aware guidance and anonymize parameter names in prompts.")
     p.add_argument("--image_input_off", action="store_true", default=False,
@@ -689,6 +691,7 @@ def main():
         gauge_num=site,
         n_candidates=args.n_candidates,
         n_peaks=args.n_peaks,
+        memory_cutoff=args.memory_cutoff,
         test_config=test_config,
         objective=args.objective,
         physics_information=not args.physics_information_off,

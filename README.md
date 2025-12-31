@@ -21,16 +21,15 @@ chmod +x download_data.sh
 ./download_data.sh
 
 # OR use docker interactively:
-docker run -it --rm -v $(pwd)/data_cali:/app/data_cali -v $(pwd)/cali_set:/app/cali_set -v $(pwd)/cali_args.txt:/app/cali_args.txt hydro-cali /bin/bash
+# 1) Build the image
+docker build -t hydro-cali .
+
+# 2) Run container
+docker run -it --rm -v "$(pwd)/data_cali":/app/data_cali -v "$(pwd)/cali_set":/app/cali_set -v "$(pwd)/.env":/app/.env -v "$(pwd)/cali_args.txt":/app/cali_args.txt hydro-cali /bin/bash
 
 #If you use docker, skip to #5
 
-# 3) Create your Python environment and install dependencies (Conda)
-conda create -n hydro-cali python=3.10
-conda activate hydro-cali
-conda install -c conda-forge pandas numpy matplotlib requests dataretrieval openai python-dotenv # or pip install -r requirements.txt
-
-# 4) Fetch and build EF5 next to this repo
+# 3) Fetch and build EF5 next to this repo
 git clone https://github.com/Skyan1002/EF5.git
 cd EF5/
 autoreconf --force --install
@@ -38,8 +37,52 @@ autoreconf --force --install
 make
 cd ..
 
+# 4) Create your Python environment and install dependencies
+python -m venv .venv  # or conda create -n hydro-cali python=3.10
+source .venv/bin/activate # or conda activate hydro-cali
+pip install -r requirements.txt # or just conda install -c conda-forge pandas numpy matplotlib requests dataretrieval openai python-dotenv
+
 # 5) Provide API keys to the agents
 echo "OPENAI_API_KEY=<YOUR_OPENAI_API_KEY>" > .env
+```
+
+---
+
+## 🐳 Singularity (HPC)
+
+If you are running on an HPC cluster where Docker is not available, you can use Singularity.
+
+### Option 1: Build Locally & Push to Docker Hub (Recommended)
+1. **Local Machine**: Build and push the image to Docker Hub.
+   ```bash
+   docker login
+   # Replace chrimerss with your Docker Hub username
+   # Use --platform linux/amd64 to ensure compatibility with most HPC clusters
+   docker build --platform linux/amd64 -t chrimerss/hydro-cali:latest .
+   docker push chrimerss/hydro-cali:latest
+   ```
+
+2. **HPC Cluster**: Pull directly from Docker Hub.
+   ```bash
+   singularity build hydro-cali.sif docker://chrimerss/hydro-cali:latest
+   ```
+
+### Option 2: Build & Convert Locally
+If you have Singularity installed on your local machine:
+```bash
+docker build -t hydro-cali .
+singularity build hydro-cali.sif docker-daemon://hydro-cali:latest
+# Then transfer hydro-cali.sif to your HPC
+```
+
+### Running on HPC
+Once you have `hydro-cali.sif` on the cluster:
+```bash
+singularity run \
+  --bind $(pwd)/data_cali:/app/data_cali \
+  --bind $(pwd)/.env:/app/.env \
+  --bind $(pwd)/cali_args.txt:/app/cali_args.txt \
+  hydro-cali.sif python3 hydro_cali_main.py @cali_args.txt --site_num 03284230
 ```
 
 ---
@@ -48,13 +91,9 @@ echo "OPENAI_API_KEY=<YOUR_OPENAI_API_KEY>" > .env
 1. Configure `cali_args.txt` with the CLI flags you reuse often (each line contains `--flag value`).
 2. Launch the pipeline for a specific gauge:
    ```bash
-   python hydro_cali_main.py @cali_args.txt --site_num 03302000
+   python3 hydro_cali_main.py @cali_args.txt --site_num 03284230
    ```
 3. Check `cali_set/<site>_<tag>/results/cali_*/cand_*/` for EF5 outputs and `history_round_*.json` for candidate evolution.
-4. For test results in 2019:
-   ```bash
-   python hydro_test_2019.py @test_args.txt --site_num 03302000
-   ```
 
 ### CLI reference
 | Flag | Purpose |
@@ -76,8 +115,9 @@ echo "OPENAI_API_KEY=<YOUR_OPENAI_API_KEY>" > .env
 | `--wm`, `--b`, `--im`, `--ke`, `--fc`, `--iwu` | Scalar Crest parameter seeds used as the starting point for candidate generation (override raster-derived defaults). |
 | `--under`, `--leaki`, `--th`, `--isu`, `--alpha`, `--beta`, `--alpha0` | KW routing parameter seeds manipulated by the agent per round. |
 | `--python_exec`, `--usgs_script_path` | Let you specify which Python binary/script should execute `usgs_gauge_download.py`. |
-| `--skip_gauge_download` (or legacy `--skip_download`) | When present, assumes gauge observations already exist and bypasses the download subprocess. |
+| `--skip_download` | When present, assumes gauge observations already exist and bypasses the download subprocess. |
 | `--n_candidates`, `--n_peaks`, `--max_rounds` | Control the calibration loop breadth, number of hydrograph peaks used for scoring, and max rounds of EF5 runs, respectively. |
+| `--memory-cutoff` | Limit the number of prior rounds included in LLM prompts to reduce context size. |
 
 > 💡 Use `@cali_args.txt` to keep long flag sets tidy; the argparse configuration already enables `fromfile_prefix_chars='@'`.
 
@@ -114,3 +154,4 @@ With these pieces, you can trace every calibration round: from `hydro_cali_main.
 | `usgs_gauge_download.py` | Utility to pull hourly discharge series from USGS NWIS. |
 | `requirements.txt` | Python dependency lock-in for both CLI and agent subsystems. |
 
+Happy calibrating!
