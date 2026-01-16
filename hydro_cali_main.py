@@ -369,15 +369,19 @@ def parse_args() -> argparse.Namespace:
     # Calibration manager knobs
     p.add_argument("--n_candidates", type=int, default=8)
     p.add_argument("--n_peaks", type=int, default=3)
-    p.add_argument("--max_rounds", type=int, default=20)
-    p.add_argument("--objective", choices=["nse_event", "nse_full", "score"], default="nse_event",
-                   help="Objective for selecting the best candidate. Default uses aggregated event NSE.")
+    p.add_argument("--max_rounds", type=int, default=10)
+    p.add_argument("--objective", choices=["nse", "kge", "cc"], default="nse",
+                   help="Objective for selecting the best candidate based on event aggregate metrics.")
+    p.add_argument("--failure_patient", type=int, default=5,
+                   help="Stop calibration after this many consecutive non-improving rounds.")
     p.add_argument("--memory-cutoff", dest="memory_cutoff", type=int, default=None,
                    help="Limit history shared with LLM agents to the most recent N rounds to reduce context size.")
     p.add_argument("--physics_information_off", action="store_true", default=False,
                    help="If set, disable physics-aware guidance and anonymize parameter names in prompts.")
     p.add_argument("--image_input_off", action="store_true", default=False,
                    help="If set, disable image sharing with the LLM agents.")
+    p.add_argument("--image_type", choices=["fdc", "hydrograph"], default="fdc",
+                   help="Image type shared with LLM agents (fdc=flow duration curve, hydrograph=legacy).")
     p.add_argument("--detail_output", action="store_true", default=False,
                    help="If set, write detailed prompts, inputs, and LLM outputs for each round.")
 
@@ -696,6 +700,8 @@ def main():
         objective=args.objective,
         physics_information=not args.physics_information_off,
         image_input=not args.image_input_off,
+        image_type=args.image_type,
+        failure_patient=args.failure_patient,
         detail_output=args.detail_output,
     )
     print(f"[INFO] Starting calibration (max_rounds={args.max_rounds}) ...")

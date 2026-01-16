@@ -24,7 +24,7 @@ TASK_BLOCK_PATTERN = lambda task: re.compile(rf"(?s)(\[Task {re.escape(task)}\].
 
 @dataclass
 class SimulationResult:
-    round_index: int
+    round_label: str
     candidate_index: int
     params: ParameterSet
     output_dir: str
@@ -138,11 +138,11 @@ class SimulationRunner:
 
     def _write_control_file(self,
                             content: str,
-                            round_index: int,
+                            round_label: str,
                             candidate_index: int,
                             *,
                             subfolder: Optional[str] = None) -> str:
-        out_dir = self.simu_folder / "controls" / f"cali_{round_index:03d}" / f"cand_{candidate_index:02d}"
+        out_dir = self.simu_folder / "controls" / round_label / f"cand_{candidate_index:02d}"
         if subfolder:
             out_dir = out_dir / subfolder
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -150,33 +150,33 @@ class SimulationRunner:
         control_path.write_text(content)
         return str(control_path.resolve())
 
-    def _output_dir(self, round_index: int, candidate_index: int, *, subfolder: Optional[str] = None) -> str:
-        out_dir = self.simu_folder / "results" / f"cali_{round_index:03d}" / f"cand_{candidate_index:02d}"
+    def _output_dir(self, round_label: str, candidate_index: int, *, subfolder: Optional[str] = None) -> str:
+        out_dir = self.simu_folder / "results" / round_label / f"cand_{candidate_index:02d}"
         if subfolder:
             out_dir = out_dir / subfolder
         out_dir.mkdir(parents=True, exist_ok=True)
         return str(out_dir.resolve())
 
-    def run(self, params: ParameterSet, round_index: int, candidate_index: int) -> SimulationResult:
-        output_dir = self._output_dir(round_index, candidate_index)
+    def run(self, params: ParameterSet, round_label: str, candidate_index: int) -> SimulationResult:
+        output_dir = self._output_dir(round_label, candidate_index)
         control_content = self._render_control(params, output_dir)
-        control_file = self._write_control_file(control_content, round_index, candidate_index)
+        control_file = self._write_control_file(control_content, round_label, candidate_index)
         log_path = Path(output_dir) / "logs" / "ef5.log"
         run_ef5(control_file, self.ef5_executable, cwd=str(self.simu_folder), log_path=str(log_path))
         csv_path = self._locate_csv(output_dir)
         if csv_path is None:
             raise FileNotFoundError(f"Simulation output CSV not found in {output_dir}")
-        return SimulationResult(round_index, candidate_index, params.copy(), output_dir, csv_path)
+        return SimulationResult(round_label, candidate_index, params.copy(), output_dir, csv_path)
 
     def run_with_overrides(self,
                            params: ParameterSet,
-                           round_index: int,
+                           round_label: str,
                            candidate_index: int,
                            *,
                            subfolder: Optional[str] = None,
                            states_dir: Optional[str] = None,
                            scalar_overrides: Optional[Dict[str, str]] = None) -> SimulationResult:
-        output_dir = self._output_dir(round_index, candidate_index, subfolder=subfolder)
+        output_dir = self._output_dir(round_label, candidate_index, subfolder=subfolder)
         control_content = self._render_control(
             params,
             output_dir,
@@ -185,7 +185,7 @@ class SimulationRunner:
         )
         control_file = self._write_control_file(
             control_content,
-            round_index,
+            round_label,
             candidate_index,
             subfolder=subfolder,
         )
@@ -194,7 +194,7 @@ class SimulationRunner:
         csv_path = self._locate_csv(output_dir)
         if csv_path is None:
             raise FileNotFoundError(f"Simulation output CSV not found in {output_dir}")
-        return SimulationResult(round_index, candidate_index, params.copy(), output_dir, csv_path)
+        return SimulationResult(round_label, candidate_index, params.copy(), output_dir, csv_path)
 
     def _locate_csv(self, output_dir: str) -> Optional[str]:
         expected = Path(output_dir) / f"ts.{self.gauge_num}.crest.csv"
@@ -207,13 +207,13 @@ class SimulationRunner:
 
 def run_simulations_parallel(runner: SimulationRunner,
                              params_list: Sequence[ParameterSet],
-                             round_index: int,
+                             round_label: str,
                              max_workers: Optional[int] = None) -> List[SimulationResult]:
     results: List[SimulationResult] = []
     worker_count = max_workers or min(len(params_list), os.cpu_count() or len(params_list))
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         future_to_idx = {
-            executor.submit(runner.run, params, round_index, idx): idx
+            executor.submit(runner.run, params, round_label, idx): idx
             for idx, params in enumerate(params_list)
         }
         for future in as_completed(future_to_idx):

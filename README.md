@@ -93,7 +93,7 @@ singularity run \
    ```bash
    python3 hydro_cali_main.py @cali_args.txt --site_num 03284230
    ```
-3. Check `cali_set/<site>_<tag>/results/cali_*/cand_*/` for EF5 outputs and `history_round_*.json` for candidate evolution.
+3. Check `cali_set/<site>_<tag>/results/round*/cand_*/` for EF5 outputs and `calibration_history.json` for candidate evolution.
 
 ### CLI reference
 | Flag | Purpose |
@@ -116,7 +116,10 @@ singularity run \
 | `--under`, `--leaki`, `--th`, `--isu`, `--alpha`, `--beta`, `--alpha0` | KW routing parameter seeds manipulated by the agent per round. |
 | `--python_exec`, `--usgs_script_path` | Let you specify which Python binary/script should execute `usgs_gauge_download.py`. |
 | `--skip_download` | When present, assumes gauge observations already exist and bypasses the download subprocess. |
-| `--n_candidates`, `--n_peaks`, `--max_rounds` | Control the calibration loop breadth, number of hydrograph peaks used for scoring, and max rounds of EF5 runs, respectively. |
+| `--n_candidates`, `--n_peaks`, `--max_rounds` | Control the calibration loop breadth, number of hydrograph peaks used for scoring, and max accepted rounds of EF5 runs, respectively. |
+| `--objective` | Metric used to accept updates (choices: `nse`, `kge`, `cc`). |
+| `--failure_patient` | Stop the calibration loop after this many consecutive non-improving rounds. |
+| `--image_type` | Select which image the LLM sees (`fdc` flow duration curve vs. `hydrograph`). |
 | `--memory-cutoff` | Limit the number of prior rounds included in LLM prompts to reduce context size. |
 
 > 💡 Use `@cali_args.txt` to keep long flag sets tidy; the argparse configuration already enables `fromfile_prefix_chars='@'`.
@@ -140,7 +143,7 @@ hydro_cali_main.py
 * `usgs_gauge_download.py` is a standalone script you can reuse outside the agent.
 * `.env` secrets are loaded via `python-dotenv` (`hydrocalib/agents/utils.py`) before contacting OpenAI’s APIs.
 
-With these pieces, you can trace every calibration round: from `hydro_cali_main.py` resolving assets ➜ `TwoStageCalibrationManager` generating candidate parameters ➜ `ef5_runner` executing EF5 ➜ `history_round_*.json` documenting results.
+With these pieces, you can trace every calibration round: from `hydro_cali_main.py` resolving assets ➜ `TwoStageCalibrationManager` generating candidate parameters ➜ `ef5_runner` executing EF5 ➜ `calibration_history.json` documenting results.
 
 ---
 
