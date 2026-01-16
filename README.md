@@ -119,6 +119,7 @@ singularity run \
 | `--n_candidates`, `--n_peaks`, `--max_rounds` | Control the calibration loop breadth, number of hydrograph peaks used for scoring, and max accepted rounds of EF5 runs, respectively. |
 | `--objective` | Metric used to accept updates (choices: `nse`, `kge`, `cc`). |
 | `--failure_patient` | Stop the calibration loop after this many consecutive non-improving rounds. |
+| `--model_type` | Optional label appended to the calibration folder name for experiment tracking. |
 | `--image_type` | Select which image the LLM sees (`fdc` flow duration curve vs. `hydrograph`). |
 | `--memory-cutoff` | Limit the number of prior rounds included in LLM prompts to reduce context size. |
 

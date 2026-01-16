@@ -374,6 +374,8 @@ def parse_args() -> argparse.Namespace:
                    help="Objective for selecting the best candidate based on event aggregate metrics.")
     p.add_argument("--failure_patient", type=int, default=5,
                    help="Stop calibration after this many consecutive non-improving rounds.")
+    p.add_argument("--model_type", default="",
+                   help="Optional label appended to the calibration folder name for experiment tracking.")
     p.add_argument("--memory-cutoff", dest="memory_cutoff", type=int, default=None,
                    help="Limit history shared with LLM agents to the most recent N rounds to reduce context size.")
     p.add_argument("--physics_information_off", action="store_true", default=False,
@@ -559,6 +561,8 @@ def main():
 
     if not args.folder_label:
         args.folder_label = _current_timestamp_label()
+    if args.model_type:
+        args.folder_label = f"{args.folder_label}_{args.model_type}"
 
     # Resolve fixed filenames from the two root folders
     args.basic_data_path   = ensure_abs_path(args.basic_data_path)
