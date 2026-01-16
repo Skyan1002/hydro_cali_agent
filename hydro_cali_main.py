@@ -382,8 +382,10 @@ def parse_args() -> argparse.Namespace:
                    help="If set, disable physics-aware guidance and anonymize parameter names in prompts.")
     p.add_argument("--image_input_off", action="store_true", default=False,
                    help="If set, disable image sharing with the LLM agents.")
-    p.add_argument("--image_type", choices=["fdc", "hydrograph"], default="fdc",
-                   help="Image type shared with LLM agents (fdc=flow duration curve, hydrograph=legacy).")
+    p.add_argument("--image_type", choices=["fdc", "hydrograph", "noimage", "noboth"], default="fdc",
+                   help=("Image type shared with LLM agents "
+                         "(fdc=flow duration curve, hydrograph=legacy, "
+                         "noimage=disable images, noboth=disable images and event inputs)."))
     p.add_argument("--detail_output", action="store_true", default=False,
                    help="If set, write detailed prompts, inputs, and LLM outputs for each round.")
 

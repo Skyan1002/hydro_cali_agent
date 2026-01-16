@@ -120,7 +120,7 @@ singularity run \
 | `--objective` | Metric used to accept updates (choices: `nse`, `kge`, `cc`). |
 | `--failure_patient` | Stop the calibration loop after this many consecutive non-improving rounds. |
 | `--model_type` | Optional label appended to the calibration folder name for experiment tracking. |
-| `--image_type` | Select which image the LLM sees (`fdc` flow duration curve vs. `hydrograph`). |
+| `--image_type` | Select which image the LLM sees (`fdc`, `hydrograph`, `noimage`, `noboth`). |
 | `--memory-cutoff` | Limit the number of prior rounds included in LLM prompts to reduce context size. |
 
 > 💡 Use `@cali_args.txt` to keep long flag sets tidy; the argparse configuration already enables `fromfile_prefix_chars='@'`.

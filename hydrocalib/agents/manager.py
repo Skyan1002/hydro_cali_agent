@@ -14,8 +14,7 @@ import numpy as np
 from ..config import (DEFAULT_GAUGE_NUM, DEFAULT_PEAK_PICK_KWARGS, DEFAULT_SIM_FOLDER,
                        EVENTS_FOR_AGGREGATE, MAX_STEPS_DEFAULT)
 from ..history import CandidateRecord, HistoryStore, RoundRecord
-from ..metrics import (aggregate_event_metrics, compute_event_metrics,
-                       read_metrics_for_period, read_metrics_from_csv)
+from ..metrics import read_metrics_for_period, read_metrics_from_csv
 from ..parameters import ParameterSet
 from .physics_info import (
     build_display_name_map,
@@ -142,23 +141,19 @@ class TwoStageCalibrationManager:
         )
         self._update_metric_bests([outcome], round_index=0)
         self.history.save()
-        agg = outcome.aggregate_metrics
         full = outcome.full_metrics
         print(
             "[Init] Baseline metrics "
-            f"event NSE={agg.get('NSE', float('nan')):.3f} "
-            f"event CC={agg.get('CC', float('nan')):.3f} "
-            f"event KGE={agg.get('KGE', float('nan')):.3f} | "
-            f"full NSE={full.get('NSE', float('nan')):.3f} "
-            f"full CC={full.get('CC', float('nan')):.3f} "
-            f"full KGE={full.get('KGE', float('nan')):.3f}"
+            f"NSE={full.get('NSE', float('nan')):.3f} "
+            f"CC={full.get('CC', float('nan')):.3f} "
+            f"KGE={full.get('KGE', float('nan')):.3f}"
         )
 
     def _process_result(self, result: SimulationResult) -> CandidateOutcome:
         windows = pick_peak_events(result.csv_path, n=self.n_peaks, **self.peak_pick_kwargs)
-        event_metrics = compute_event_metrics(result.csv_path, windows)
-        aggregate = aggregate_event_metrics(event_metrics, top_n=self.n_peaks)
         full_metrics = read_metrics_from_csv(result.csv_path)
+        event_metrics: List[Dict[str, float]] = []
+        aggregate = full_metrics.copy()
         return CandidateOutcome(result, result.params, windows, event_metrics, aggregate, full_metrics)
 
     def _run_test_suite(self, params: Sequence[ParameterSet], round_label: str) -> Dict[int, Dict[str, Any]]:
@@ -388,9 +383,9 @@ class TwoStageCalibrationManager:
 
     def _build_context(self) -> RoundContext:
         assert self.best_outcome is not None
-        description = "Top candidate metrics averaged across selected events."
+        description = "Candidate metrics from the full simulation period (event metrics disabled)."
         images = []
-        if self.image_input:
+        if self.image_input and self.image_type not in ("noimage", "noboth"):
             if self.image_type == "hydrograph":
                 if self.best_outcome.hydrograph_path:
                     images.append(self.best_outcome.hydrograph_path)
@@ -412,7 +407,7 @@ class TwoStageCalibrationManager:
             param_display_names=prompt_param_names,
             aggregate_metrics=self.best_outcome.aggregate_metrics,
             full_metrics=self.best_outcome.full_metrics,
-            event_metrics=self.best_outcome.event_metrics[: self.n_peaks],
+            event_metrics=[],
             history_summary=self._history_summary(),
             description=description,
             images=images,
@@ -466,9 +461,6 @@ class TwoStageCalibrationManager:
         return score
 
     def _objective_value(self, aggregate: Dict[str, float], full: Dict[str, float]) -> float:
-        if self.objective == "score":
-            return self._candidate_score(aggregate, full)
-
         metric_key = self.objective.upper()
         value = aggregate.get(metric_key, float("nan"))
 
@@ -476,7 +468,6 @@ class TwoStageCalibrationManager:
 
     def _collect_round_bests(self, outcomes: Sequence[CandidateOutcome]) -> Dict[str, Dict[str, Any]]:
         metric_extractors = {
-            "score": lambda outcome: self._candidate_score(outcome.aggregate_metrics, outcome.full_metrics),
             "objective": lambda outcome: self._objective_value(outcome.aggregate_metrics, outcome.full_metrics),
             "full_nse": lambda outcome: outcome.full_metrics.get("NSE", float("nan")),
             "full_cc": lambda outcome: outcome.full_metrics.get("CC", float("nan")),
@@ -543,15 +534,12 @@ class TwoStageCalibrationManager:
             for outcome in outcomes:
                 agg = outcome.aggregate_metrics
                 full = outcome.full_metrics
-                score = self._candidate_score(agg, full)
                 objective_value = self._objective_value(agg, full)
                 print(
                     f"    [Cand {outcome.simulation.candidate_index}] "
-                    f"objective({self.objective})={objective_value:.3f} | score={score:.3f} | "
-                    f"event NSE={agg.get('NSE', float('nan')):.3f} "
-                    f"CC={agg.get('CC', float('nan')):.3f} KGE={agg.get('KGE', float('nan')):.3f} "
-                    f"lag={agg.get('lag_hours', float('nan')):.2f}h | "
-                    f"full NSE={full.get('NSE', float('nan')):.3f} CC={full.get('CC', float('nan')):.3f} "
+                    f"objective({self.objective})={objective_value:.3f} | "
+                    f"full NSE={full.get('NSE', float('nan')):.3f} "
+                    f"CC={full.get('CC', float('nan')):.3f} "
                     f"KGE={full.get('KGE', float('nan')):.3f}"
                 )
 
@@ -565,9 +553,6 @@ class TwoStageCalibrationManager:
             print(
                 f"[Round {self.round_label}] Best candidate {best_outcome.simulation.candidate_index}: "
                 f"objective({self.objective})={objective_value:.3f} | "
-                f"event NSE={agg.get('NSE', float('nan')):.3f} "
-                f"event CC={agg.get('CC', float('nan')):.3f} "
-                f"event KGE={agg.get('KGE', float('nan')):.3f} | "
                 f"full NSE={full.get('NSE', float('nan')):.3f} "
                 f"full CC={full.get('CC', float('nan')):.3f} "
                 f"full KGE={full.get('KGE', float('nan')):.3f}"
@@ -647,23 +632,6 @@ class TwoStageCalibrationManager:
         for outcome in outcomes:
             agg = outcome.aggregate_metrics
             full = outcome.full_metrics
-            score = self._candidate_score(agg, full)
-            if self.history.update_best_metric(
-                key="score",
-                value=score,
-                aggregate_metrics=agg,
-                full_metrics=full,
-                params=outcome.params.values.copy(),
-                round_index=round_index,
-                candidate_index=outcome.simulation.candidate_index,
-            ):
-                self._ensure_plots(outcome)
-                self._publish_best(
-                    outcome,
-                    subfolder="best",
-                    metadata={"criterion": "score", "criterion_value": score},
-                )
-
             for metric in ("NSE", "CC", "KGE"):
                 value = full.get(metric, float("nan"))
                 if not np.isfinite(value):
