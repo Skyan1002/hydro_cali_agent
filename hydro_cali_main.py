@@ -374,6 +374,8 @@ def parse_args() -> argparse.Namespace:
                    help="Objective for selecting the best candidate based on event aggregate metrics.")
     p.add_argument("--failure_patient", type=int, default=5,
                    help="Stop calibration after this many consecutive non-improving rounds.")
+    p.add_argument("--exp_prefix", default="",
+                   help="Optional prefix prepended to the calibration folder name for experiment grouping.")
     p.add_argument("--model_type", default="",
                    help="Optional label appended to the calibration folder name for experiment tracking.")
     p.add_argument("--memory-cutoff", dest="memory_cutoff", type=int, default=None,
@@ -563,6 +565,8 @@ def main():
 
     if not args.folder_label:
         args.folder_label = _current_timestamp_label()
+    if args.exp_prefix:
+        args.folder_label = f"{args.exp_prefix}_{args.folder_label}"
     if args.model_type:
         args.folder_label = f"{args.folder_label}_{args.model_type}"
 
