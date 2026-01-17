@@ -567,8 +567,6 @@ def main():
         args.folder_label = _current_timestamp_label()
     if args.model_type:
         args.folder_label = f"{args.folder_label}_{args.model_type}"
-    if args.exp_prefix:
-        args.folder_label = f"{args.exp_prefix}_{args.folder_label}"
 
     # Resolve fixed filenames from the two root folders
     args.basic_data_path   = ensure_abs_path(args.basic_data_path)
@@ -613,7 +611,10 @@ def main():
           f"area_km2={'NA' if info.drainage_area_km2 is None else f'{info.drainage_area_km2:.2f}'}")
 
     # 2) Resolve folders and OBS CSV path
-    control_folder = os.path.join(args.cali_set_dir, f"{site}_{args.cali_tag}_{args.folder_label}")
+    folder_name = f"{site}_{args.cali_tag}_{args.folder_label}"
+    if args.exp_prefix:
+        folder_name = f"{args.exp_prefix}_{folder_name}"
+    control_folder = os.path.join(args.cali_set_dir, folder_name)
     obs_csv_path = build_obs_csv_path(args.gauge_outdir, site)
 
     # 3) Clip MRMS to a site-specific subset for faster runs
