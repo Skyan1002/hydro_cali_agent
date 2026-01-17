@@ -565,10 +565,10 @@ def main():
 
     if not args.folder_label:
         args.folder_label = _current_timestamp_label()
-    if args.exp_prefix:
-        args.folder_label = f"{args.exp_prefix}_{args.folder_label}"
     if args.model_type:
         args.folder_label = f"{args.folder_label}_{args.model_type}"
+    if args.exp_prefix:
+        args.folder_label = f"{args.exp_prefix}_{args.folder_label}"
 
     # Resolve fixed filenames from the two root folders
     args.basic_data_path   = ensure_abs_path(args.basic_data_path)
