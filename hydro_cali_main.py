@@ -577,6 +577,7 @@ def main():
     args.gauge_outdir      = ensure_abs_path(args.gauge_outdir)
     args.results_outdir    = ensure_abs_path(args.results_outdir)
     args.usgs_script_path  = ensure_abs_path(args.usgs_script_path)
+    args.exp_prefix = (args.exp_prefix or "").strip()
 
     warmup_time_state = args.warmup_time_end
     
@@ -615,6 +616,8 @@ def main():
     if args.exp_prefix:
         folder_name = f"{args.exp_prefix}_{folder_name}"
     control_folder = os.path.join(args.cali_set_dir, folder_name)
+    if args.exp_prefix:
+        print(f"[INFO] Using exp_prefix={args.exp_prefix}")
     obs_csv_path = build_obs_csv_path(args.gauge_outdir, site)
 
     # 3) Clip MRMS to a site-specific subset for faster runs
