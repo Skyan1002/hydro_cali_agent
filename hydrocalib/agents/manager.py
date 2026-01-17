@@ -14,7 +14,8 @@ import numpy as np
 from ..config import (DEFAULT_GAUGE_NUM, DEFAULT_PEAK_PICK_KWARGS, DEFAULT_SIM_FOLDER,
                        EVENTS_FOR_AGGREGATE, MAX_STEPS_DEFAULT)
 from ..history import CandidateRecord, HistoryStore, RoundRecord
-from ..metrics import read_metrics_for_period, read_metrics_from_csv
+from ..metrics import (aggregate_event_metrics, compute_event_metrics,
+                       read_metrics_for_period, read_metrics_from_csv)
 from ..parameters import ParameterSet
 from .physics_info import (
     build_display_name_map,
@@ -155,9 +156,9 @@ class TwoStageCalibrationManager:
 
     def _process_result(self, result: SimulationResult) -> CandidateOutcome:
         windows = pick_peak_events(result.csv_path, n=self.n_peaks, **self.peak_pick_kwargs)
+        event_metrics = compute_event_metrics(result.csv_path, windows)
+        aggregate = aggregate_event_metrics(event_metrics, top_n=self.n_peaks)
         full_metrics = read_metrics_from_csv(result.csv_path)
-        event_metrics: List[Dict[str, float]] = []
-        aggregate = full_metrics.copy()
         return CandidateOutcome(result, result.params, windows, event_metrics, aggregate, full_metrics)
 
     def _run_test_suite(self, params: Sequence[ParameterSet], round_label: str) -> Dict[int, Dict[str, Any]]:
@@ -420,7 +421,7 @@ class TwoStageCalibrationManager:
 
     def _build_context(self, *, image_summary: str) -> RoundContext:
         assert self.best_outcome is not None
-        description = "Candidate metrics from the full simulation period (event metrics disabled)."
+        description = "Top candidate metrics averaged across selected events."
         images: List[str] = []
         display_params = display_parameters(self.best_outcome.params.values, self.display_name_map)
         prompt_param_names = (
@@ -436,7 +437,7 @@ class TwoStageCalibrationManager:
             param_display_names=prompt_param_names,
             aggregate_metrics=self.best_outcome.aggregate_metrics,
             full_metrics=self.best_outcome.full_metrics,
-            event_metrics=[],
+            event_metrics=self.best_outcome.event_metrics[: self.n_peaks],
             history_summary=self._history_summary(),
             description=description,
             images=images,
