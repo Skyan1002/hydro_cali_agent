@@ -1,0 +1,77 @@
+
+defaults:
+  - _self_
+
+# Core settings
+site_num: "03076500"  # Default gauge, can be overridden via CLI: site_num=12345
+basic_data_path: data_cali/basic_data/basic  # Required: Folder containing dem_usa.tif, fdir_usa.tif, etc.
+default_param_dir: data_cali/basic_data/default_param # Required: Folder containing crest_params/ and kw_params/
+
+# Folder layout
+cali_set_dir: "./cali_set"
+cali_tag: "2018"
+folder_label: null # Defaults to timestamp if null
+
+# Forcings
+precip_path: data_cali/mrmsGauge_18_19 # Required
+precip_name: GaugeCorr_QPE_01H_00.00_YYYYMMDD-HH0000.grib2.tif # Required
+pet_path: data_cali/pet    # Required
+pet_name: etYYYYMMDD.tif    # Required
+
+# Outputs
+gauge_outdir: data_cali/gauge_18_19   # Required
+results_outdir: data_cali/results # Required
+
+# Time config
+time_begin: 201801010000
+time_end: 201806302300
+time_step: "1h"
+
+warmup_time_begin: "201710010000"
+warmup_time_end: "201801010000"
+
+test_warmup_begin: "201801010000"
+test_warmup_end: "201901010000"
+test_time_begin: "201901010000"
+test_time_end: "201912312300"
+test_time_step: "1h"
+test_eval_start: "2019-01-01 00:00"
+test_eval_end: "2019-12-31 23:00"
+disable_test_run: false
+
+# Model parameters
+model: "CREST"
+routing: "KW"
+wm: 1.0
+b: 1.0
+im: 1.0
+ke: 1.0
+fc: 1.0
+iwu: 25.0
+under: 1.0
+leaki: 1.0
+th: 10.0
+isu: 0.0
+alpha: 1.0
+beta: 1.0
+alpha0: 0.0
+
+# Download options
+python_exec: "python3" # Defaults to system python
+usgs_script_path: "./usgs_gauge_download.py"
+skip_gauge_download: false
+
+# Calibration options
+n_candidates: 8
+n_peaks: 3
+max_rounds: 20
+objective: "nse_event"
+memory_cutoff: null
+physics_information_off: false
+image_input_off: false
+detail_output: false
+
+# LLM Configuration
+llm:
+  model: "gemini-3-pro-preview"
+  api_key: "" # GOOGLE_API_KEY for gemini model and OPENAI_API_KEY for openai model

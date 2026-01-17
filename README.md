@@ -5,7 +5,7 @@
 ## ✨ What you get
 - Reproducible scripts to fetch forcing/observation data (`download_data.sh`, `usgs_gauge_download.py`).
 - A Python driver (`hydro_cali_main.py`) that assembles EF5 control files, manages results, and coordinates iterative calibration logic.
-- Agent utilities (`hydrocalib/agents/*`) that leverage OpenAI models via a `.env` file for proposal generation.
+- Agent utilities (`hydrocalib/agents/*`) that leverage LLM models (Gemini-3-Pro default) via a `.env` file for proposal generation.
 
 ---
 
@@ -44,6 +44,7 @@ pip install -r requirements.txt # or just conda install -c conda-forge pandas nu
 
 # 5) Provide API keys to the agents
 echo "OPENAI_API_KEY=<YOUR_OPENAI_API_KEY>" > .env
+echo "GOOGLE_API_KEY=<YOUR_GOOGLE_API_KEY>" >> .env # Required for Gemini models
 ```
 
 ---
@@ -85,41 +86,39 @@ singularity run \
   hydro-cali.sif python3 hydro_cali_main.py @cali_args.txt --site_num 03284230
 ```
 
+On docker: 
+
+```bash
+docker run --rm \
+  -v "$(pwd)/data_cali:/app/data_cali" \
+  -v "$(pwd)/cali_set:/app/cali_set" \
+  -v "$(pwd)/.env:/app/.env" \
+  -v "$(pwd)/cali_args.txt:/app/cali_args.txt" \
+  hydro-cali \
+  python3 hydro_cali_main.py @cali_args.txt
+```
+
 ---
 
 ## 🧠 Running the calibration agent
-1. Configure `cali_args.txt` with the CLI flags you reuse often (each line contains `--flag value`).
-2. Launch the pipeline for a specific gauge:
+1. Configure defaults in `conf/config.yaml`.
+2. Launch the pipeline for a specific gauge (overriding defaults via CLI):
    ```bash
-   python3 hydro_cali_main.py @cali_args.txt --site_num 03284230
+   python3 hydro_cali_main.py site_num=03284230
    ```
 3. Check `cali_set/<site>_<tag>/results/cali_*/cand_*/` for EF5 outputs and `history_round_*.json` for candidate evolution.
 
-### CLI reference
-| Flag | Purpose |
-| --- | --- |
-| `--site_num` | USGS gauge identifier that anchors the calibration and data download workflow. |
-| `--basic_data_path` | Directory that must contain `dem_usa.tif`, `fdir_usa.tif`, `facc_usa.tif` for terrain/flow routing inputs. |
-| `--default_param_dir` | Folder with `crest_params/` & `kw_params/` grids (e.g., `wm_usa.tif`, `alpha_usa.tif`) used as spatial priors. |
-| `--cali_set_dir` | Root folder where site-specific subdirectories (control files, histories, plots) are created. Defaults to `./cali_set`. |
-| `--cali_tag` | Text appended to the site folder (`<site>_<tag>`) to distinguish multiple experiments (e.g., `2018`, `stormA`). |
-| `--folder_label` | Optional extra suffix after `<site>_<tag>` when creating the calibration folder. Defaults to the creation timestamp `YYYYMMDDHHmm`. |
-| `--precip_path`, `--precip_name` | Location and filename pattern for precipitation rasters passed to EF5’s `[PrecipForcing]`. |
-| `--pet_path`, `--pet_name` | PET raster location/pattern for `[PETForcing]`. |
-| `--gauge_outdir` | Where the script stores downloaded hourly USGS CSV files (`USGS_<id>_1h_UTC.csv`). |
-| `--results_outdir` | Target directory recorded in the template control file; EF5 run artifacts end up under `<cali_set>/<site>/<results/...` when managed by the runner. |
-| `--time_begin`, `--time_end` | Simulation window in `YYYYMMDDhhmm`. Controls both data download span and EF5 control file. |
-| `--warmup_time_begin`, `--warmup_time_end` | Warmup run window (defaults `201710010000` → `201801010000`) written to the `[Task warmup]` block. |
-| `--time_step` | EF5 timestep (default `1h`), also forwarded to the USGS downloader. |
-| `--model`, `--routing` | EF5 model and routing scheme names written into `[Task Simu]`. Defaults are `CREST` and `KW`. |
-| `--wm`, `--b`, `--im`, `--ke`, `--fc`, `--iwu` | Scalar Crest parameter seeds used as the starting point for candidate generation (override raster-derived defaults). |
-| `--under`, `--leaki`, `--th`, `--isu`, `--alpha`, `--beta`, `--alpha0` | KW routing parameter seeds manipulated by the agent per round. |
-| `--python_exec`, `--usgs_script_path` | Let you specify which Python binary/script should execute `usgs_gauge_download.py`. |
-| `--skip_download` | When present, assumes gauge observations already exist and bypasses the download subprocess. |
-| `--n_candidates`, `--n_peaks`, `--max_rounds` | Control the calibration loop breadth, number of hydrograph peaks used for scoring, and max rounds of EF5 runs, respectively. |
-| `--memory-cutoff` | Limit the number of prior rounds included in LLM prompts to reduce context size. |
+### CLI reference (Hydra)
+Use `key=value` syntax to override `conf/config.yaml`.
+Examples:
+- `site_num="03284230"`: Target USGS gauge.
+- `basic_data_path="/path/to/data"`: Override basic data path.
+- `llm.model="gpt-4o"`: Switch LLM model.
+- `llm.api_key="sk-..."`: Provide API key directly (or set `GOOGLE_API_KEY`/`OPENAI_API_KEY` env var).
 
-> 💡 Use `@cali_args.txt` to keep long flag sets tidy; the argparse configuration already enables `fromfile_prefix_chars='@'`.
+See `conf/config.yaml` for all available options.
+
+> 💡 Hydra supports robust configuration composition. See [Hydra documentation](https://hydra.cc/docs/intro/) for more.
 
 ---
 
@@ -132,13 +131,13 @@ hydro_cali_main.py
     ├─ hydrocalib.parameters / config → define tunable parameter spaces & guards
     ├─ hydrocalib.peak_events / metrics → score EF5 hydrographs vs. observations
     ├─ hydrocalib.ef5_runner → renders control files, launches EF5 binaries
-    ├─ hydrocalib.agents.* → OpenAI-driven candidate proposal helpers
+    ├─ hydrocalib.agents.* → LLM-driven candidate proposal helpers
     └─ hydrocalib.plotting → produce round-by-round diagnostics
 ```
 
 * `download_data.sh` bundles frequently used forcing/PET datasets for quick experiments.
 * `usgs_gauge_download.py` is a standalone script you can reuse outside the agent.
-* `.env` secrets are loaded via `python-dotenv` (`hydrocalib/agents/utils.py`) before contacting OpenAI’s APIs.
+* `.env` secrets are loaded via `python-dotenv` (`hydrocalib/agents/utils.py`) before contacting LLM APIs.
 
 With these pieces, you can trace every calibration round: from `hydro_cali_main.py` resolving assets ➜ `TwoStageCalibrationManager` generating candidate parameters ➜ `ef5_runner` executing EF5 ➜ `history_round_*.json` documenting results.
 

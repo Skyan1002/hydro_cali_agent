@@ -14,6 +14,7 @@ from .utils import (
     extract_json_block,
     get_client,
     redact_history_block,
+    load_skill,
 )
 from ..config import LLM_MODEL_REASONING
 from ..parameters import ParameterSet
@@ -80,8 +81,15 @@ class EvaluationAgent:
         if context.images:
             content = [{"type": "text", "text": user_prompt}]
             content.extend({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_image(img)}"}} for img in context.images)
+            
+            # Inject Hydrograph Interpreter Skill
+            skill_content = load_skill("hydrograph_interpreter")
+            enhanced_system_prompt = self.system_prompt
+            if skill_content:
+                 enhanced_system_prompt += f"\n\nUse the following protocol strictly to analyze the image:\n\n{skill_content}"
+
             messages = [
-                {"role": "system", "content": self.system_prompt},
+                {"role": "system", "content": enhanced_system_prompt},
                 {"role": "user", "content": content},
             ]
         else:

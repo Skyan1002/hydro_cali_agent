@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-LLM_MODEL_DEFAULT = "gpt-5"
-LLM_MODEL_REASONING = "gpt-5"
+LLM_MODEL_DEFAULT = "gemini-3-pro"
+LLM_MODEL_REASONING = "gemini-3-pro"
 
 # Calibration behaviour
 MAX_STEPS_DEFAULT = 20

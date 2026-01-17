@@ -2,22 +2,15 @@
 # -*- coding: utf-8 -*-
 
 """
-hydro_cali_main.py (simplified)
+hydro_cali_main.py (Hydra-fied)
 
 Key changes:
-- Replace individual DEM/DDM/FAM flags with --basic_data_path
-  expecting: dem_usa.tif, fdir_usa.tif, facc_usa.tif inside it.
-- Replace individual parameter grid flags with --default_param_dir
-  expecting subfolders and files:
-    <default_param_dir>/crest_params/{wm_usa.tif, im_usa.tif, ksat_usa.tif, b_usa.tif}
-    <default_param_dir>/kw_params/{leaki_usa.tif, alpha_usa.tif, beta_usa.tif, alpha0_usa.tif}
-- Still: downloads USGS gauge CSV, writes control.txt, and runs calibration.
+- Uses Hydra for configuration management (conf/config.yaml).
+- Replaces argparse with standard Hydra @hydra.main pattern.
 """
 
-import argparse
 import math
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -26,6 +19,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Any, Union, Iterable
 
+import hydra
+from omegaconf import DictConfig, OmegaConf
 import requests
 import rasterio
 import numpy as np
@@ -33,6 +28,641 @@ from osgeo import gdal
 from rasterio.coords import BoundingBox
 from rasterio.windows import from_bounds
 from tqdm import tqdm
+
+# ----------------------------- constants ---------------------------------
+MI2_TO_KM2 = 2.58999
+
+
+# ------------------------ USGS helpers (robust) --------------------------
+@dataclass
+class UsgsSiteInfo:
+    site_no: str
+    latitude: float
+    longitude: float
+    drainage_area_km2: Optional[float]  # may be None
+
+
+def _parse_rdb_site(text: str, site_no: str):
+    """Parse NWIS RDB (siteOutput=expanded) and return (lat, lon, area_km2 or None)."""
+    lines = [ln for ln in text.splitlines() if ln and not ln.startswith("#")]
+    if len(lines) < 3:
+        raise ValueError("RDB response is incomplete.")
+    header = lines[0].strip().split("\t")
+    rows = [ln.strip().split("\t") for ln in lines[2:] if ln.strip()]
+    records = [dict(zip(header, row)) for row in rows]
+    rec = next((r for r in records if r.get("site_no") == site_no),
+               (records[0] if records else None))
+    if not rec:
+        raise ValueError(f"Site {site_no} not found in RDB.")
+
+    lat = float(rec["dec_lat_va"])
+    lon = float(rec["dec_long_va"])
+    da_km2 = None
+    mi2 = (rec.get("drain_area_va") or "").strip()
+    if mi2 and mi2.upper() != "NA":
+        try:
+            da_km2 = float(mi2) * MI2_TO_KM2
+        except ValueError:
+            da_km2 = None
+    return lat, lon, da_km2
+
+
+def _extract_drnarea_from_streamstats(obj: Union[dict, list]) -> Optional[float]:
+    """Search any nested 'parameters' for DRNAREA and return km^2."""
+    if isinstance(obj, dict):
+        params = obj.get("parameters")
+        if isinstance(params, list):
+            for p in params:
+                code = str(p.get("code", "")).upper()
+                if code == "DRNAREA":
+                    val = p.get("value")
+                    units = (p.get("unit") or p.get("units") or "").lower()
+                    if val is None:
+                        continue
+                    try:
+                        val = float(val)
+                    except (TypeError, ValueError):
+                        continue
+                    if "square kilometer" in units or "sq km" in units or "km" in units:
+                        return val
+                    return val * MI2_TO_KM2
+        for v in obj.values():
+            got = _extract_drnarea_from_streamstats(v)
+            if got is not None:
+                return got
+    elif isinstance(obj, list):
+        for item in obj:
+            got = _extract_drnarea_from_streamstats(item)
+            if got is not None:
+                return got
+    return None
+
+
+def _streamstats_drainage_area_km2(lat: float, lon: float, timeout: int = 30) -> Optional[float]:
+    """Call StreamStats watershed service (no explicit rcode) and read DRNAREA."""
+    url = "https://streamstats.usgs.gov/streamstatsservices/watershed.geojson"
+    params = {
+        "x": lon, "y": lat, "crs": 4326,
+        "includeparameters": "true",
+        "includefeatures": "false",
+        "simplify": "true",
+    }
+    r = requests.get(url, params=params, timeout=timeout)
+    r.raise_for_status()
+    data = r.json()
+    return _extract_drnarea_from_streamstats(data)
+
+
+def get_usgs_site_info(site_no: str, timeout: int = 20) -> UsgsSiteInfo:
+    """Fetch site lon/lat and drainage area (km^2)."""
+    base = "https://waterservices.usgs.gov/nwis/site/"
+    headers = {"User-Agent": "python-requests/usgs-helper"}
+    params_rdb = {"sites": site_no, "format": "rdb", "siteOutput": "expanded", "siteStatus": "all"}
+    resp = requests.get(base, params=params_rdb, headers=headers, timeout=timeout)
+    resp.raise_for_status()
+    lat, lon, da_km2 = _parse_rdb_site(resp.text, site_no)
+    if da_km2 is None:
+        try:
+            da_km2 = _streamstats_drainage_area_km2(lat, lon, timeout=max(30, timeout))
+        except Exception:
+            pass
+    return UsgsSiteInfo(site_no=site_no, latitude=lat, longitude=lon, drainage_area_km2=da_km2)
+
+
+# --------------------- control.txt templating utilities -------------------
+DEFAULT_TEMPLATE = """[Basic]
+DEM={DEM_PATH}
+DDM={DDM_PATH}
+FAM={FAM_PATH}
+PROJ=geographic
+ESRIDDM=true
+SelfFAM=false
+
+[PrecipForcing MRMS]
+TYPE=TIF
+UNIT=mm/h
+FREQ=1h
+LOC={PRECIP_PATH}
+NAME={PRECIP_NAME}
+
+[PETForcing PET]
+TYPE=TIF
+UNIT=mm/100d
+FREQ=d
+LOC={PET_PATH}
+NAME={PET_NAME}
+
+[Gauge {SITE_NO}]
+LON={LON}
+LAT={LAT}
+OBS={OBS_PATH}
+OUTPUTTS=TRUE
+WANTCO=TRUE
+BASINAREA={BASINAREA}
+
+[Basin 0]
+GAUGE={SITE_NO}
+
+[CrestParamSet CrestParam]
+gauge={SITE_NO}
+WM_GRID={WM_GRID}
+IM_GRID={IM_GRID}
+FC_GRID={FC_GRID}
+B_GRID={B_GRID}
+wm={WM}
+b={B}
+im={IM}
+ke={KE}
+fc={FC}
+iwu={IWU}
+
+[kwparamset KWParam]
+gauge={SITE_NO}
+leaki_grid={LEAKI_GRID}
+alpha_grid={ALPHA_GRID}
+beta_grid={BETA_GRID}
+alpha0_grid={ALPHA0_GRID}
+under={UNDER}
+leaki={LEAKI}
+th={TH}
+isu={ISU}
+alpha={ALPHA}
+beta={BETA}
+alpha0={ALPHA0}
+
+[Task warmup]
+STYLE=SIMU
+MODEL={MODEL}
+ROUTING={ROUTING}
+BASIN=0
+PRECIP=MRMS
+PET=PET
+OUTPUT={RESULTS_OUTDIR}
+PARAM_SET=CrestParam
+ROUTING_PARAM_Set=KWParam
+TIMESTEP={TIME_STEP}
+STATES={RESULTS_OUTDIR}
+TIME_STATE={WARMUP_TIME_STATE}
+TIME_BEGIN={WARMUP_TIME_BEGIN}
+TIME_END={WARMUP_TIME_END}
+
+[Task Simu]
+STYLE=SIMU
+MODEL={MODEL}
+ROUTING={ROUTING}
+BASIN=0
+PRECIP=MRMS
+PET=PET
+STATES={RESULTS_OUTDIR}
+OUTPUT={RESULTS_OUTDIR}
+PARAM_SET=CrestParam
+ROUTING_PARAM_Set=KWParam
+TIMESTEP={TIME_STEP}
+TIME_BEGIN={TIME_BEGIN}
+TIME_END={TIME_END}
+
+[Execute]
+TASK=warmup
+TASK=Simu
+""".rstrip() + "\n"
+
+
+def _format_lat(lat: float) -> str:
+    return f"{lat:.4f}"
+
+
+def _format_lon(lon: float) -> str:
+    return f"{lon:.4f}"
+
+
+def _format_area_km2(area: float) -> str:
+    return f"{area:.2f}"
+
+
+def build_control_text(template: str,
+                       site_no: str,
+                       lon: float,
+                       lat: float,
+                       basin_km2: Optional[float],
+                       **kwargs) -> str:
+    """Fill the control template with all values."""
+    return template.format(
+        SITE_NO=site_no,
+        LON=_format_lon(lon),
+        LAT=_format_lat(lat),
+        BASINAREA=_format_area_km2(basin_km2) if basin_km2 is not None else "NA",
+        **kwargs
+    )
+
+
+# --------------------------- calibration runner --------------------------
+def try_import_manager():
+    """Import TwoStageCalibrationManager from common locations."""
+    try:
+        from hydrocalib.agents.manager import TwoStageCalibrationManager
+        return TwoStageCalibrationManager
+    except Exception:
+        try:
+            from aquah_cali.hydrocalib.agents.manager import TwoStageCalibrationManager
+            return TwoStageCalibrationManager
+        except Exception as e:
+            raise ImportError(
+                "Cannot import TwoStageCalibrationManager. "
+                "Ensure 'hydrocalib' (or 'aquah_cali.hydrocalib') is importable."
+            ) from e
+
+
+def ensure_dir(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
+
+
+def _current_timestamp_label() -> str:
+    """Return the default folder label (current time in YYYYMMDDHHmm)."""
+    return datetime.now().strftime("%Y%m%d%H%M")
+
+
+def _compute_precip_bounds(lat: float, lon: float, drainage_area_km2: Optional[float]) -> Optional[BoundingBox]:
+    """Estimate a lat/lon bounding box for clipping MRMS based on drainage area."""
+    if drainage_area_km2 is None or drainage_area_km2 <= 0:
+        return None
+    x_deg = math.sqrt(drainage_area_km2) / 100.0
+    half_span = 2 * x_deg
+    return BoundingBox(
+        left=lon - half_span,
+        bottom=lat - half_span,
+        right=lon + half_span,
+        top=lat + half_span,
+    )
+
+
+def _iter_precip_files(src_dir: Path) -> Iterable[Path]:
+    for path in sorted(src_dir.iterdir()):
+        if path.is_file() and path.suffix.lower() in {".tif", ".tiff"}:
+            yield path
+
+
+def _clip_raster(src_path: Path, dst_path: Path, bounds: BoundingBox) -> None:
+    output_path = dst_path
+    nodata_val = -9999
+
+    # Open the grib2 file using GDAL for metadata and optional full copy
+    src_ds = gdal.Open(str(src_path))
+    if src_ds is None:
+        raise ValueError(f"Could not open file {src_path}")
+
+    try:
+        # Process with basin clipping using rasterio
+        with rasterio.open(src_path) as src:
+            window = from_bounds(bounds.left, bounds.bottom, bounds.right, bounds.top, src.transform)
+            clipped_data = src.read(1, window=window)
+            clipped_data = np.where((clipped_data > 1000) | (clipped_data < 0), nodata_val, clipped_data)
+            clipped_data = clipped_data.astype(np.float32)
+
+            clipped_transform = rasterio.windows.transform(window, src.transform)
+
+            new_meta = {
+                "driver": "GTiff",
+                "height": clipped_data.shape[0],
+                "width": clipped_data.shape[1],
+                "count": 1,
+                "dtype": "float32",
+                "crs": src.crs,
+                "transform": clipped_transform,
+                "nodata": nodata_val,
+                "compress": "none",
+            }
+
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            with rasterio.open(output_path, "w", **new_meta) as dst:
+                dst.write(clipped_data, 1)
+    finally:
+        src_ds = None
+
+
+def clip_mrms_dataset(src_dir: str, dst_dir: str, bounds: BoundingBox) -> str:
+    """Clip all MRMS GeoTIFF files in ``src_dir`` into ``dst_dir``."""
+    src_path = Path(src_dir)
+    dst_path = Path(dst_dir)
+    ensure_dir(str(dst_path))
+
+    if not src_path.exists():
+        raise FileNotFoundError(f"MRMS source directory not found: {src_path}")
+
+    tif_files = list(_iter_precip_files(src_path))
+    if not tif_files:
+        print(f"[WARN] No MRMS raster files found under {src_path}; skipping clipping.")
+        return str(dst_path)
+
+    existing = list(_iter_precip_files(dst_path))
+    if existing:
+        src_names = {p.name for p in tif_files}
+        dst_names = {p.name for p in existing}
+        if src_names == dst_names:
+            print(f"[INFO] Using existing clipped MRMS data at {dst_path}")
+            return str(dst_path)
+
+        print(f"[INFO] Refreshing clipped MRMS data in {dst_path} to match source files")
+        for path in existing:
+            path.unlink()
+
+    print(f"[INFO] Clipping {len(tif_files)} MRMS files to {dst_path} ...")
+    for tif in tqdm(tif_files, desc="Clipping MRMS", unit="file"):
+        dst_file = dst_path / tif.name
+        _clip_raster(tif, dst_file, bounds)
+
+    return str(dst_path)
+
+
+def build_obs_csv_path(gauge_outdir: str, site_no: str) -> str:
+    """OBS file naming follows your convention: USGS_<id>_1h_UTC.csv"""
+    ensure_dir(gauge_outdir)
+    return os.path.join(gauge_outdir, f"USGS_{site_no}_1h_UTC.csv")
+
+
+def run_usgs_downloader(python_exec: str,
+                        script_path: str,
+                        site_no: str,
+                        time_begin: str,
+                        time_end: str,
+                        test_time_end: Optional[str],
+                        time_step: str,
+                        outdir: str) -> None:
+    """Call your existing usgs_gauge_download.py via subprocess."""
+    def _max_time_str(*times: str) -> str:
+        """Return the latest timestamp (YYYYMMDDHH) among the provided values."""
+        # Ensure input times are strings
+        str_times = [str(t) for t in times if t]
+        parsed = [datetime.strptime(t[:10], "%Y%m%d%H") for t in str_times]
+        return max(parsed).strftime("%Y%m%d%H")
+
+    download_end = _max_time_str(time_end, test_time_end)
+    cmd = [
+        python_exec, script_path,
+        "--site_num", site_no,
+        "--time_start", str(time_begin)[:10],
+        "--time_end", download_end,
+        "--time_step", time_step,
+        "--output", outdir
+    ]
+    print("[INFO] Running:", " ".join(cmd))
+    subprocess.run(cmd, check=True)
+
+
+def write_control_file(control_folder: str, control_text: str) -> str:
+    ensure_dir(control_folder)
+    out_path = os.path.join(control_folder, "control.txt")
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(control_text)
+    return out_path
+
+
+def ensure_abs_path(path: str) -> str:
+    """Convert relative paths to absolute paths based on the current working directory."""
+    if path is None:
+        return path
+    path = os.path.expanduser(path)
+    if os.path.isabs(path):
+        return path
+    return os.path.abspath(os.path.join(os.getcwd(), path))
+
+
+def make_args_object(cfg: DictConfig) -> Any:
+    """Create a dummy object to mimic the argparse namespace expected by TwoStageCalibrationManager."""
+    # This is a lightweight shim mainly to pass config params to the manager
+    @dataclass
+    class ArgsShim:
+        pass
+    shim = ArgsShim()
+    for k, v in cfg.items():
+        if k != "llm": # Skip nested dicts if not needed flattened
+            setattr(shim, k, v)
+    return shim
+
+
+@hydra.main(version_base=None, config_path="conf", config_name="config")
+def main(cfg: DictConfig):
+    # Print the config to verify
+    # print(OmegaConf.to_yaml(cfg))
+
+    # set environment variables if provided in conf
+    if cfg.llm.api_key:
+        print("[INFO] Setting API Key from configuration.")
+        # Determine provider based on model name simple heuristic or add provider field
+        if "gemini" in cfg.llm.model:
+            os.environ["GOOGLE_API_KEY"] = cfg.llm.api_key
+        else:
+             os.environ["OPENAI_API_KEY"] = cfg.llm.api_key
+             
+    # Inject model Config into global config module if needed, or rely on manager
+    # However, hydrocalib/config.py reads from global vars. 
+    # The manager reads from args_obj which we construct below.
+    # We might need to handle the case where manager logic needs update.
+    # Currently manager accepts args_obj and uses it to init params.
+    
+    # Also update the constants in hydrocalib.config if possible (nasty hack but effective)
+    try:
+        import hydrocalib.config as hc
+        hc.LLM_MODEL_DEFAULT = cfg.llm.model
+        hc.LLM_MODEL_REASONING = cfg.llm.model
+    except ImportError:
+        pass
+
+
+    site = str(cfg.site_num)
+
+    # Use cfg fields
+    folder_label = cfg.folder_label
+    if not folder_label:
+        folder_label = _current_timestamp_label()
+
+    # Resolve paths
+    basic_data_path   = ensure_abs_path(cfg.basic_data_path)
+    default_param_dir = ensure_abs_path(cfg.default_param_dir)
+    cali_set_dir      = ensure_abs_path(cfg.cali_set_dir)
+    precip_path       = ensure_abs_path(cfg.precip_path)
+    pet_path          = ensure_abs_path(cfg.pet_path)
+    gauge_outdir      = ensure_abs_path(cfg.gauge_outdir)
+    results_outdir    = ensure_abs_path(cfg.results_outdir)
+    usgs_script_path  = ensure_abs_path(cfg.usgs_script_path)
+
+    # Check required missing paths (Hydra ??? throws MissingConfigException, but if user passes None)
+    # Hydra ensures checked values usually.
+    
+    warmup_time_state = cfg.warmup_time_end
+    
+    dem_path = os.path.join(basic_data_path, "dem_usa.tif")
+    ddm_path = os.path.join(basic_data_path, "fdir_usa.tif")
+    fam_path = os.path.join(basic_data_path, "facc_usa.tif")
+
+    crest_dir = os.path.join(default_param_dir, "crest_params")
+    kw_dir = os.path.join(default_param_dir, "kw_params")
+
+    wm_grid = os.path.join(crest_dir, "wm_usa.tif")
+    im_grid = os.path.join(crest_dir, "im_usa.tif")
+    fc_grid = os.path.join(crest_dir, "ksat_usa.tif")
+    b_grid  = os.path.join(crest_dir, "b_usa.tif")
+
+    leaki_grid = os.path.join(kw_dir, "leaki_usa.tif")
+    alpha_grid = os.path.join(kw_dir, "alpha_usa.tif")
+    beta_grid  = os.path.join(kw_dir, "beta_usa.tif")
+    alpha0_grid= os.path.join(kw_dir, "alpha0_usa.tif")
+
+    # Optional path validation
+    for pth in [dem_path, ddm_path, fam_path,
+                wm_grid, im_grid, fc_grid, b_grid,
+                leaki_grid, alpha_grid, beta_grid, alpha0_grid]:
+        if not os.path.isfile(pth):
+            print(f"[WARN] Expected file not found: {pth}")
+
+    # 1) Fetch lon/lat/area
+    print(f"[INFO] Fetching site info for {site} ...")
+    info = get_usgs_site_info(site)
+    print(f"[INFO]  lat={info.latitude:.6f}, lon={info.longitude:.6f}, "
+          f"area_km2={'NA' if info.drainage_area_km2 is None else f'{info.drainage_area_km2:.2f}'}")
+
+    # 2) Resolve folders and OBS CSV path
+    control_folder = os.path.join(cali_set_dir, f"{site}_{cfg.cali_tag}_{folder_label}")
+    obs_csv_path = build_obs_csv_path(gauge_outdir, site)
+
+    # 3) Clip MRMS to a site-specific subset for faster runs
+    precip_clipped_path = precip_path
+    clip_bounds = _compute_precip_bounds(info.latitude, info.longitude, info.drainage_area_km2)
+    if clip_bounds is None:
+        print("[WARN] Drainage area unknown; skipping MRMS clipping and using original precip path.")
+    else:
+        clip_dir = os.path.join(control_folder, "data_mrms_clip")
+        precip_clipped_path = clip_mrms_dataset(precip_path, clip_dir, clip_bounds)
+
+    # 4) Optionally download the hourly CSV
+    if not cfg.skip_gauge_download:
+        run_usgs_downloader(
+            python_exec=cfg.python_exec,
+            script_path=usgs_script_path,
+            site_no=site,
+            time_begin=cfg.time_begin,
+            time_end=cfg.time_end,
+            test_time_end=cfg.test_time_end,
+            time_step=cfg.time_step,
+            outdir=gauge_outdir
+        )
+    else:
+        print("[INFO] Skipping gauge download as requested.")
+
+    # 5) Build control.txt content
+    control_text = build_control_text(
+        template=DEFAULT_TEMPLATE,
+        site_no=site,
+        lon=info.longitude,
+        lat=info.latitude,
+        basin_km2=info.drainage_area_km2,
+        DEM_PATH=dem_path,
+        DDM_PATH=ddm_path,
+        FAM_PATH=fam_path,
+        PRECIP_PATH=precip_clipped_path,
+        PRECIP_NAME=cfg.precip_name,
+        PET_PATH=pet_path,
+        PET_NAME=cfg.pet_name,
+        OBS_PATH=obs_csv_path,
+        WM_GRID=wm_grid,
+        IM_GRID=im_grid,
+        FC_GRID=fc_grid,
+        B_GRID=b_grid,
+        WM=cfg.wm, B=cfg.b, IM=cfg.im, KE=cfg.ke, FC=cfg.fc, IWU=cfg.iwu,
+        LEAKI_GRID=leaki_grid, ALPHA_GRID=alpha_grid, BETA_GRID=beta_grid, ALPHA0_GRID=alpha0_grid,
+        UNDER=cfg.under, LEAKI=cfg.leaki, TH=cfg.th, ISU=cfg.isu,
+        ALPHA=cfg.alpha, BETA=cfg.beta, ALPHA0=cfg.alpha0,
+        MODEL=cfg.model, ROUTING=cfg.routing,
+        RESULTS_OUTDIR=results_outdir,
+        STATE_PATH=results_outdir,
+        TIME_STEP=cfg.time_step,
+        WARMUP_TIME_STATE=warmup_time_state,
+        WARMUP_TIME_BEGIN=cfg.warmup_time_begin,
+        WARMUP_TIME_END=cfg.warmup_time_end,
+        TIME_BEGIN=cfg.time_begin,
+        TIME_END=cfg.time_end,
+    )
+
+    # 6) Write control.txt
+    control_path = write_control_file(control_folder, control_text)
+    print(f"[INFO] control.txt written to: {control_path}")
+
+    # 7) Run calibration
+    TwoStageCalibrationManager = try_import_manager()
+
+    test_config = None
+    if not cfg.disable_test_run:
+        try:
+            from hydrocalib.agents.manager import TestConfig
+
+            test_config = TestConfig(
+                enabled=True,
+                warmup_begin=cfg.test_warmup_begin,
+                warmup_end=cfg.test_warmup_end,
+                warmup_state=cfg.test_warmup_end,
+                time_begin=cfg.test_time_begin,
+                time_end=cfg.test_time_end,
+                timestep=cfg.test_time_step,
+                eval_start=cfg.test_eval_start,
+                eval_end=cfg.test_eval_end,
+            )
+        except Exception as e:
+            print(f"[WARN] Could not configure test simulations: {e}")
+
+    # Manager expects an argparse-like object for params
+    # We construct a shim from cfg
+    args_shim = make_args_object(cfg)
+
+    calib = TwoStageCalibrationManager(
+        args_shim,
+        simu_folder=os.path.relpath(control_folder, start=os.getcwd()),
+        gauge_num=site,
+        n_candidates=cfg.n_candidates,
+        n_peaks=cfg.n_peaks,
+        memory_cutoff=cfg.memory_cutoff,
+        test_config=test_config,
+        objective=cfg.objective,
+        physics_information=not cfg.physics_information_off,
+        image_input=not cfg.image_input_off,
+        detail_output=cfg.detail_output,
+        llm_model=cfg.llm.model,
+    )
+    print(f"[INFO] Starting calibration (max_rounds={cfg.max_rounds}) ...")
+    calib.run(max_rounds=cfg.max_rounds)
+    print("[INFO] Calibration finished.")
+
+
+if __name__ == "__main__":
+    # Custom pre-parser to handle @cali_args.txt style inputs
+    new_argv = [sys.argv[0]]
+    for arg in sys.argv[1:]:
+        if arg.startswith("@"):
+            filepath = arg[1:]
+            if os.path.exists(filepath):
+                print(f"[INFO] Reading arguments from {filepath}...")
+                with open(filepath, "r") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#"):
+                            continue
+                        # Remove leading -- if present
+                        if line.startswith("--"):
+                            line = line[2:]
+                        if "=" in line:
+                            key, val = line.split("=", 1)
+                            key = key.replace("-", "_")
+                            new_argv.append(f"{key}={val}")
+                        else:
+                            # It might be a boolean flag that argparse would handle as True?
+                            # Hydra expects key=value or boolean overrides like key=true
+                            # Start simple: append if it looks valid
+                             new_argv.append(line)
+            else:
+                print(f"[WARN] Argument file {filepath} not found.")
+        else:
+            new_argv.append(arg)
+    
+    sys.argv = new_argv
+    main()
 
 # ----------------------------- constants ---------------------------------
 MI2_TO_KM2 = 2.58999
