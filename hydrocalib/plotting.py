@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import os
 from typing import Dict, List, Optional, Sequence, Tuple
+from pathlib import Path
 
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
 import numpy as np
 import pandas as pd
 
@@ -345,8 +347,38 @@ def plot_flow_duration_curve(csv_path: str, show: bool = True) -> str:
     return output_path
 
 
+def plot_image_montage(image_paths: Sequence[Optional[str]],
+                       output_path: str,
+                       *,
+                       titles: Optional[Sequence[str]] = None) -> str:
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    axes_flat = axes.flatten()
+
+    titles = list(titles) if titles is not None else []
+    while len(titles) < 4:
+        titles.append("")
+
+    for idx, ax in enumerate(axes_flat):
+        img_path = image_paths[idx] if idx < len(image_paths) else None
+        if img_path and Path(img_path).exists():
+            img = mpimg.imread(img_path)
+            ax.imshow(img)
+        else:
+            ax.text(0.5, 0.5, "Missing image", ha="center", va="center", fontsize=14)
+        if titles[idx]:
+            ax.set_title(titles[idx])
+        ax.axis("off")
+
+    plt.tight_layout()
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(output_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return output_path
+
+
 __all__ = [
     "plot_hydrograph_with_precipitation",
     "plot_event_windows",
     "plot_flow_duration_curve",
+    "plot_image_montage",
 ]

@@ -27,9 +27,11 @@ from ..plotting import (
     plot_event_windows,
     plot_flow_duration_curve,
     plot_hydrograph_with_precipitation,
+    plot_image_montage,
 )
 from ..simulation import SimulationResult, SimulationRunner, run_simulations_parallel
 from .evaluation import EvaluationAgent
+from .image_reader import ImageSummaryAgent
 from .proposal import ProposalAgent
 from .types import RoundContext
 
@@ -44,6 +46,7 @@ class CandidateOutcome:
     full_metrics: Dict[str, float]
     hydrograph_path: Optional[str] = None
     fdc_path: Optional[str] = None
+    montage_path: Optional[str] = None
     event_figures: List[str] = field(default_factory=list)
 
 
@@ -95,6 +98,7 @@ class TwoStageCalibrationManager:
             display_name_map=self.display_name_map,
             detail_output=detail_output,
         )
+        self.image_reader = ImageSummaryAgent(detail_output=detail_output)
         self.n_candidates = n_candidates
         self.n_peaks = n_peaks
         self.include_max_event_images = include_max_event_images
@@ -266,6 +270,20 @@ class TwoStageCalibrationManager:
             )[:self.include_max_event_images]
         outcome.event_figures = valid_figures
 
+    def _ensure_montage(self, outcome: CandidateOutcome) -> Optional[str]:
+        image_paths: List[Optional[str]] = [outcome.fdc_path]
+        image_paths.extend(outcome.event_figures[:3])
+        while len(image_paths) < 4:
+            image_paths.append(None)
+        montage_dir = Path(outcome.simulation.output_dir)
+        montage_path = montage_dir / "image_montage.png"
+        outcome.montage_path = plot_image_montage(
+            image_paths,
+            str(montage_path),
+            titles=["FDC", "Event 1", "Event 2", "Event 3"],
+        )
+        return outcome.montage_path
+
     def _publish_best(self,
                       outcome: CandidateOutcome,
                       subfolder: str,
@@ -278,6 +296,8 @@ class TwoStageCalibrationManager:
             shutil.copy2(outcome.hydrograph_path, best_dir / Path(outcome.hydrograph_path).name)
         if outcome.fdc_path:
             shutil.copy2(outcome.fdc_path, best_dir / Path(outcome.fdc_path).name)
+        if outcome.montage_path:
+            shutil.copy2(outcome.montage_path, best_dir / Path(outcome.montage_path).name)
         events_dir = best_dir / "events"
         events_dir.mkdir(exist_ok=True)
         for fig in outcome.event_figures:
@@ -310,6 +330,7 @@ class TwoStageCalibrationManager:
             "params": outcome.params.values.copy(),
             "hydrograph": outcome.hydrograph_path,
             "flow_duration_curve": outcome.fdc_path,
+            "image_montage": outcome.montage_path,
             "event_figures": outcome.event_figures[: self.include_max_event_images],
         }
 
@@ -358,6 +379,22 @@ class TwoStageCalibrationManager:
         summary = "Recent failed attempts: " + " | ".join(summary_lines)
         return summary, tail
 
+    def _build_image_summary(self, outcome: CandidateOutcome) -> str:
+        if not self.image_input or self.image_type in ("noimage", "noboth"):
+            return ""
+        self._ensure_plots(outcome)
+        montage_path = self._ensure_montage(outcome)
+        if not montage_path:
+            return ""
+        summary, reader_log = self.image_reader.summarize(
+            montage_path,
+            round_label=self.round_label,
+            return_log=self.detail_output,
+        )
+        if reader_log:
+            self._log_detail("image_reader", self.round_label, reader_log)
+        return summary
+
     def _record_failure(self,
                         best_outcome: CandidateOutcome,
                         objective_value: float,
@@ -381,18 +418,10 @@ class TwoStageCalibrationManager:
         }
         self.failure_history.append(record)
 
-    def _build_context(self) -> RoundContext:
+    def _build_context(self, *, image_summary: str) -> RoundContext:
         assert self.best_outcome is not None
         description = "Candidate metrics from the full simulation period (event metrics disabled)."
-        images = []
-        if self.image_input and self.image_type not in ("noimage", "noboth"):
-            if self.image_type == "hydrograph":
-                if self.best_outcome.hydrograph_path:
-                    images.append(self.best_outcome.hydrograph_path)
-                images.extend(self.best_outcome.event_figures[: self.include_max_event_images])
-            else:
-                if self.best_outcome.fdc_path:
-                    images.append(self.best_outcome.fdc_path)
+        images: List[str] = []
         display_params = display_parameters(self.best_outcome.params.values, self.display_name_map)
         prompt_param_names = (
             self.display_name_map
@@ -411,6 +440,7 @@ class TwoStageCalibrationManager:
             history_summary=self._history_summary(),
             description=description,
             images=images,
+            image_summary=image_summary,
             failure_summary=failure_summary,
             failure_details=failure_details,
             physics_information=self.physics_information,
@@ -513,7 +543,8 @@ class TwoStageCalibrationManager:
         while self.update_round <= max_rounds:
             self.round_label = self._format_round_label(self.update_round, self.failure_round)
             self.round_index = self.update_round
-            context = self._build_context()
+            image_summary = self._build_image_summary(self.best_outcome)
+            context = self._build_context(image_summary=image_summary)
             proposals, refined_candidates, refined_params, eval_meta = self._request_candidates(
                 context, self.round_label
             )

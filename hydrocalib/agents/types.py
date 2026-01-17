@@ -18,6 +18,7 @@ class RoundContext:
     history_summary: str
     description: str = ""
     images: List[str] = field(default_factory=list)
+    image_summary: str = ""
     failure_summary: str = ""
     failure_details: List[Dict[str, Any]] = field(default_factory=list)
     physics_information: bool = True

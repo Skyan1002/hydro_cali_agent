@@ -61,6 +61,7 @@ class ProposalAgent:
             "full_metrics": context.full_metrics,
             "event_metrics": context.event_metrics,
             "history_summary": context.history_summary,
+            "image_summary": context.image_summary,
             "failure_summary": context.failure_summary,
             "failed_attempts": context.failure_details,
             "requested_candidates": k,
