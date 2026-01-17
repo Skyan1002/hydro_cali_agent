@@ -5,8 +5,9 @@ from __future__ import annotations
 import base64
 import json
 import re
+import os
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional, Union
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -15,19 +16,91 @@ from ..config import FROZEN_PARAMETERS
 from ..parameters import ParameterSet, apply_step_guard
 
 load_dotenv()
-_client = OpenAI()
 _JSON_RE = re.compile(r"\{[\s\S]*\}", re.M)
 
 
-def get_client() -> OpenAI:
+class UnifiedClient:
+    """A wrapper client that routes to OpenAI or Google GenAI (via OpenAI adapter) based on model name."""
+    def __init__(self):
+        self._openai = None
+        self._google_openai = None
+    
+    @property
+    def openai_client(self):
+        if self._openai is None:
+            self._openai = OpenAI()
+        return self._openai
+
+    @property
+    def google_openai_client(self):
+        if self._google_openai is None:
+            api_key = os.getenv("GOOGLE_API_KEY")
+            if not api_key:
+                # Let it fail downstream if key is missing, or print warning?
+                # OpenAI client might raise error if key is None on init or on call.
+                pass
+            self._google_openai = OpenAI(
+                api_key=api_key,
+                base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
+            )
+        return self._google_openai
+
+    @property
+    def chat(self):
+        return self
+
+    @property
+    def completions(self):
+        return self
+
+    def create(self, model: str, messages: List[Dict[str, Any]], **kwargs) -> Any:
+        # Check if it's a Gemini model
+        if "gemini" in model.lower():
+            # Use Google's OpenAI-compatible endpoint
+            return self.google_openai_client.chat.completions.create(model=model, messages=messages, **kwargs)
+        else:
+            # Use standard OpenAI endpoint
+            return self.openai_client.chat.completions.create(model=model, messages=messages, **kwargs)
+
+
+_client = UnifiedClient()
+
+
+def get_client() -> UnifiedClient:
     return _client
 
 
 def extract_json_block(text: str) -> Dict[str, Any]:
+    # Gemini sometimes puts ```json ... ``` wrapper
+    # The existing regex \{[\s\S]*\} matches the JSON block inside
     match = _JSON_RE.search(text)
     if not match:
+        # Fallback: try to find the first { and last }
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1:
+            snippet = text[start : end + 1]
+            try:
+                return json.loads(snippet)
+            except:
+                pass
         raise ValueError("No JSON object found in LLM response")
-    return json.loads(match.group(0))
+    
+    # Try parsing the match
+    try:
+        return json.loads(match.group(0))
+    except json.JSONDecodeError:
+         # If strict regex failed (due to markdown backticks potentially interfering if inside match? 
+         # actually regex is greedy internal so it should capture everything between { })
+         pass
+         
+    # Logic to strip ```json if they are caught inside?
+    # Actually the current regex takes outermost braces if greedy? 
+    # re.compile(r"\{[\s\S]*\}", re.M) is greedy.
+    # It grabs from first { to last }.
+    
+    block = match.group(0)
+    return json.loads(block)
 
 
 def redact_history_block(prompt_text: str) -> str:

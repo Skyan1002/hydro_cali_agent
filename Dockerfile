@@ -26,6 +26,7 @@ RUN apt-get update && apt-get install -y --fix-missing \
 	python3 \
 	python3-pip \
     libgdal-dev \
+	python3-gdal \
 	wget \
 	vim \
 	nano
