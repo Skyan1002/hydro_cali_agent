@@ -145,6 +145,31 @@ def b64_image(path: str) -> str:
     data = Path(path).read_bytes()
     return base64.b64encode(data).decode("utf-8")
 
+def load_skill(skill_name: str) -> str:
+    """Load the content of a skill from the skills directory."""
+    # Assume skills are located in ../../skills relative to this file
+    # This file is in hydrocalib/agents/utils.py -> ../../skills is project_root/skills
+    base_dir = Path(__file__).parent.parent.parent
+    skill_path = base_dir / "skills" / skill_name / "SKILL.md"
+    
+    if not skill_path.exists():
+        print(f"[WARN] Skill {skill_name} not found at {skill_path}")
+        return ""
+        
+    try:
+        content = skill_path.read_text(encoding="utf-8")
+        # Strip frontmatter if present (between --- and ---)
+        if content.startswith("---"):
+            try:
+                _, _, body = content.split("---", 2)
+                return body.strip()
+            except ValueError:
+                return content
+        return content
+    except Exception as e:
+        print(f"[WARN] Failed to load skill {skill_name}: {e}")
+        return ""
+
 
 __all__ = [
     "get_client",
@@ -152,4 +177,5 @@ __all__ = [
     "coerce_updates",
     "b64_image",
     "redact_history_block",
+    "load_skill",
 ]
