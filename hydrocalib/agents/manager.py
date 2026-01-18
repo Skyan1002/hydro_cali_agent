@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -541,14 +542,30 @@ class TwoStageCalibrationManager:
         if self.best_outcome is None:
             self.initialize_baseline()
 
+        next_proposals = None
+        next_refined = None
+        next_params = None
+        next_eval_meta: Dict[str, Any] = {}
+
         while self.update_round <= max_rounds:
             self.round_label = self._format_round_label(self.update_round, self.failure_round)
             self.round_index = self.update_round
-            image_summary = self._build_image_summary(self.best_outcome)
-            context = self._build_context(image_summary=image_summary)
-            proposals, refined_candidates, refined_params, eval_meta = self._request_candidates(
-                context, self.round_label
-            )
+
+            if next_params is None:
+                image_summary = self._build_image_summary(self.best_outcome)
+                context = self._build_context(image_summary=image_summary)
+                proposals, refined_candidates, refined_params, eval_meta = self._request_candidates(
+                    context, self.round_label
+                )
+            else:
+                proposals = next_proposals or []
+                refined_candidates = next_refined or []
+                refined_params = next_params
+                eval_meta = next_eval_meta
+                next_proposals = None
+                next_refined = None
+                next_params = None
+                next_eval_meta = {}
 
             print(
                 f"[Round {self.round_label}] Launching {len(refined_params)} simulations "
@@ -604,6 +621,11 @@ class TwoStageCalibrationManager:
                         f"({self.failure_round}/{self.failure_patient}). Stopping calibration."
                     )
                     break
+                image_summary = self._build_image_summary(self.best_outcome)
+                context = self._build_context(image_summary=image_summary)
+                proposals, refined_candidates, refined_params, eval_meta = self._request_candidates(
+                    context, self.round_label
+                )
                 continue
 
             self.best_outcome = best_outcome
@@ -653,10 +675,23 @@ class TwoStageCalibrationManager:
                 )
 
             if self.test_config and self.test_config.enabled:
-                test_summaries = self._run_test_suite(refined_params, self.round_label)
-                print(
-                    f"[Round {self.round_label}] Test summaries written for {len(test_summaries)} candidates."
-                )
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    futures = {"test": executor.submit(self._run_test_suite, refined_params, self.round_label)}
+                    if self.update_round <= max_rounds:
+                        image_summary = self._build_image_summary(self.best_outcome)
+                        next_context = self._build_context(image_summary=image_summary)
+                        futures["proposal"] = executor.submit(
+                            self._request_candidates, next_context, self._format_round_label(self.update_round, 0)
+                        )
+
+                    for key, future in futures.items():
+                        if key == "test":
+                            test_summaries = future.result()
+                            print(
+                                f"[Round {self.round_label}] Test summaries written for {len(test_summaries)} candidates."
+                            )
+                        elif key == "proposal":
+                            (next_proposals, next_refined, next_params, next_eval_meta) = future.result()
 
     def _update_metric_bests(self,
                              outcomes: Sequence[CandidateOutcome],
