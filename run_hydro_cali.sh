@@ -11,18 +11,22 @@ GAUGE_IDS=(
 OUTPUT_FILE="hydro_cali_all_gauges.txt"
 
 # Experiment prefix (applies to all runs)
-EXP_PREFIX="batch_exp_0116"
+EXP_PREFIX="exp001"
+
+# Single run configuration per gauge
+MODEL_TYPE="noboth"
+IMAGE_INPUT_OFF=true
+PHYSICS_INFORMATION_OFF=true
 
 # Clear previous output if the file exists
 > "$OUTPUT_FILE"
 
 run_case() {
   local gauge_id="$1"
-  local case_id="$2"
-  local case_label="$3"
-  shift 3
+  local case_label="$2"
+  shift 2
 
-  echo "[${case_id}] ${case_label}" >> "$OUTPUT_FILE"
+  echo "[RUN] ${case_label}" >> "$OUTPUT_FILE"
   python hydro_cali_main.py @cali_args.txt \
     --site_num "${gauge_id}" \
     --exp_prefix "${EXP_PREFIX}" \
@@ -34,25 +38,29 @@ for GAUGE_ID in "${GAUGE_IDS[@]}"; do
   echo "Running hydro calibration for gauge_id=${GAUGE_ID}" >> "$OUTPUT_FILE"
   echo "==================================================" >> "$OUTPUT_FILE"
 
-  run_case "${GAUGE_ID}" 1 "image_input_off + physics_information_off" \
-    --image_input_off \
-    --physics_information_off \
-    --model_type noboth \
-    --detail_output
+  if [[ -z "${EXP_PREFIX}" ]]; then
+    echo "EXP_PREFIX must be non-empty." >> "$OUTPUT_FILE"
+    exit 1
+  fi
 
-  run_case "${GAUGE_ID}" 2 "image_input_off" \
-    --image_input_off \
-    --model_type noimage \
-    --detail_output
+  case_label="model_type=${MODEL_TYPE}"
+  if [[ "${IMAGE_INPUT_OFF}" == true ]]; then
+    case_label="${case_label}, image_input_off"
+  fi
+  if [[ "${PHYSICS_INFORMATION_OFF}" == true ]]; then
+    case_label="${case_label}, physics_information_off"
+  fi
 
-  run_case "${GAUGE_ID}" 3 "physics_information_off" \
-    --physics_information_off \
-    --model_type nophysics \
-    --detail_output
+  args=()
+  if [[ "${IMAGE_INPUT_OFF}" == true ]]; then
+    args+=(--image_input_off)
+  fi
+  if [[ "${PHYSICS_INFORMATION_OFF}" == true ]]; then
+    args+=(--physics_information_off)
+  fi
+  args+=(--model_type "${MODEL_TYPE}" --detail_output)
 
-  run_case "${GAUGE_ID}" 4 "baseline (all on)" \
-    --model_type base \
-    --detail_output
+  run_case "${GAUGE_ID}" "${case_label}" "${args[@]}"
   echo -e "\nFinished gauge_id=${GAUGE_ID}\n" >> "$OUTPUT_FILE"
 done
 
