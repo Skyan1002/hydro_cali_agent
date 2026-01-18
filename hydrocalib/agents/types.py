@@ -8,7 +8,7 @@ from typing import Any, Dict, List
 
 @dataclass
 class RoundContext:
-    round_index: int
+    round_index: str
     params: Dict[str, float]
     display_params: Dict[str, float]
     param_display_names: Dict[str, str]
@@ -18,5 +18,8 @@ class RoundContext:
     history_summary: str
     description: str = ""
     images: List[str] = field(default_factory=list)
+    image_summary: str = ""
+    failure_summary: str = ""
+    failure_details: List[Dict[str, Any]] = field(default_factory=list)
     physics_information: bool = True
     physics_prompt: str = ""

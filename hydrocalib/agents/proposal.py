@@ -61,6 +61,9 @@ class ProposalAgent:
             "full_metrics": context.full_metrics,
             "event_metrics": context.event_metrics,
             "history_summary": context.history_summary,
+            "image_summary": context.image_summary,
+            "failure_summary": context.failure_summary,
+            "failed_attempts": context.failure_details,
             "requested_candidates": k,
             "notes": context.description,
             "physics_information": context.physics_information,
@@ -99,6 +102,7 @@ class ProposalAgent:
             "system_prompt": self.system_prompt,
             "user_prompt": redact_history_block(user_prompt),
             "input_files": [Path(img).name for img in context.images],
+            "input_paths": [str(Path(img).resolve()) for img in context.images],
             "output_text": raw,
             "parsed_output": data,
         }
