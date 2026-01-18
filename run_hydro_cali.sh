@@ -38,23 +38,21 @@ for GAUGE_ID in "${GAUGE_IDS[@]}"; do
     --image_input_off \
     --physics_information_off \
     --model_type noboth \
-    --detail_output &
+    --detail_output
 
   run_case "${GAUGE_ID}" 2 "image_input_off" \
     --image_input_off \
     --model_type noimage \
-    --detail_output &
+    --detail_output
 
   run_case "${GAUGE_ID}" 3 "physics_information_off" \
     --physics_information_off \
     --model_type nophysics \
-    --detail_output &
+    --detail_output
 
   run_case "${GAUGE_ID}" 4 "baseline (all on)" \
     --model_type base \
-    --detail_output &
-
-  wait
+    --detail_output
   echo -e "\nFinished gauge_id=${GAUGE_ID}\n" >> "$OUTPUT_FILE"
 done
 
