@@ -431,6 +431,11 @@ class TwoStageCalibrationManager:
             else {v: v for v in self.display_name_map.values()}
         )
         failure_summary, failure_details = self._format_failure_summary()
+        if self.image_type in ("noimage", "noboth"):
+            description = "Event diagnostics withheld for this run."
+            event_metrics = []
+        else:
+            event_metrics = self.best_outcome.event_metrics[: self.n_peaks]
         return RoundContext(
             round_index=self.round_label,
             params=self.best_outcome.params.values.copy(),
@@ -438,7 +443,7 @@ class TwoStageCalibrationManager:
             param_display_names=prompt_param_names,
             aggregate_metrics=self.best_outcome.aggregate_metrics,
             full_metrics=self.best_outcome.full_metrics,
-            event_metrics=self.best_outcome.event_metrics[: self.n_peaks],
+            event_metrics=event_metrics,
             history_summary=self._history_summary(),
             description=description,
             images=images,
