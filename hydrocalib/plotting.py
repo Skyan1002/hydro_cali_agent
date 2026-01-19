@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import os
 from typing import Dict, List, Optional, Sequence, Tuple
+from pathlib import Path
 
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
 import numpy as np
 import pandas as pd
 
@@ -298,7 +300,85 @@ def plot_event_windows(csv_path: str,
     return saved
 
 
+def plot_flow_duration_curve(csv_path: str, show: bool = True) -> str:
+    df = pd.read_csv(csv_path)
+    sim_col = "Discharge(m^3 s^-1)"
+    obs_col = "Observed(m^3 s^-1)"
+
+    def _prepare(series: pd.Series) -> tuple[np.ndarray, np.ndarray]:
+        vals = pd.to_numeric(series, errors="coerce").to_numpy()
+        vals = vals[np.isfinite(vals)]
+        vals = vals[vals > 0]
+        if vals.size == 0:
+            return np.array([]), np.array([])
+        sorted_vals = np.sort(vals)[::-1]
+        ranks = np.arange(1, sorted_vals.size + 1)
+        exceed_prob = ranks / (sorted_vals.size + 1) * 100.0
+        return exceed_prob, sorted_vals
+
+    sim_exceed, sim_vals = _prepare(df[sim_col]) if sim_col in df.columns else (np.array([]), np.array([]))
+    obs_exceed, obs_vals = _prepare(df[obs_col]) if obs_col in df.columns else (np.array([]), np.array([]))
+
+    plt.rcParams.update({"font.family": "serif", "font.size": 14})
+    fig, ax = plt.subplots(figsize=(8, 6))
+
+    if sim_vals.size:
+        ax.plot(sim_exceed, sim_vals, label="Simulated", linewidth=2, color="tab:blue")
+    if obs_vals.size:
+        ax.plot(obs_exceed, obs_vals, label="Observed", linewidth=2, color="k")
+
+    if sim_vals.size or obs_vals.size:
+        ax.set_yscale("log")
+    ax.set_xlim(0, 100)
+    ax.set_xlabel("Exceedance probability (%)")
+    ax.set_ylabel("Discharge (m³/s)")
+    ax.set_title("Flow Duration Curve")
+    ax.grid(True, alpha=0.3, which="both")
+    ax.legend(loc="best")
+
+    output_dir = os.path.dirname(csv_path)
+    output_path = os.path.join(output_dir, "fdc.png")
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+    return output_path
+
+
+def plot_image_montage(image_paths: Sequence[Optional[str]],
+                       output_path: str,
+                       *,
+                       titles: Optional[Sequence[str]] = None) -> str:
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    axes_flat = axes.flatten()
+
+    titles = list(titles) if titles is not None else []
+    while len(titles) < 4:
+        titles.append("")
+
+    for idx, ax in enumerate(axes_flat):
+        img_path = image_paths[idx] if idx < len(image_paths) else None
+        if img_path and Path(img_path).exists():
+            img = mpimg.imread(img_path)
+            ax.imshow(img)
+        else:
+            ax.text(0.5, 0.5, "Missing image", ha="center", va="center", fontsize=14)
+        if titles[idx]:
+            ax.set_title(titles[idx])
+        ax.axis("off")
+
+    plt.tight_layout()
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(output_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return output_path
+
+
 __all__ = [
     "plot_hydrograph_with_precipitation",
     "plot_event_windows",
+    "plot_flow_duration_curve",
+    "plot_image_montage",
 ]

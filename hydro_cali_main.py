@@ -369,15 +369,25 @@ def parse_args() -> argparse.Namespace:
     # Calibration manager knobs
     p.add_argument("--n_candidates", type=int, default=8)
     p.add_argument("--n_peaks", type=int, default=3)
-    p.add_argument("--max_rounds", type=int, default=20)
-    p.add_argument("--objective", choices=["nse_event", "nse_full", "score"], default="nse_event",
-                   help="Objective for selecting the best candidate. Default uses aggregated event NSE.")
+    p.add_argument("--max_rounds", type=int, default=10)
+    p.add_argument("--objective", choices=["nse", "kge", "cc"], default="nse",
+                   help="Objective for selecting the best candidate based on event aggregate metrics.")
+    p.add_argument("--failure_patient", type=int, default=5,
+                   help="Stop calibration after this many consecutive non-improving rounds.")
+    p.add_argument("--exp_prefix", default="",
+                   help="Optional prefix prepended to the calibration folder name for experiment grouping.")
+    p.add_argument("--model_type", default="",
+                   help="Optional label appended to the calibration folder name for experiment tracking.")
     p.add_argument("--memory-cutoff", dest="memory_cutoff", type=int, default=None,
                    help="Limit history shared with LLM agents to the most recent N rounds to reduce context size.")
     p.add_argument("--physics_information_off", action="store_true", default=False,
                    help="If set, disable physics-aware guidance and anonymize parameter names in prompts.")
     p.add_argument("--image_input_off", action="store_true", default=False,
                    help="If set, disable image sharing with the LLM agents.")
+    p.add_argument("--image_type", choices=["fdc", "hydrograph", "noimage", "noboth"], default="fdc",
+                   help=("Image type shared with LLM agents "
+                         "(fdc=flow duration curve, hydrograph=legacy, "
+                         "noimage=disable images, noboth=disable images and event inputs)."))
     p.add_argument("--detail_output", action="store_true", default=False,
                    help="If set, write detailed prompts, inputs, and LLM outputs for each round.")
 
@@ -555,6 +565,8 @@ def main():
 
     if not args.folder_label:
         args.folder_label = _current_timestamp_label()
+    if args.model_type:
+        args.folder_label = f"{args.folder_label}_{args.model_type}"
 
     # Resolve fixed filenames from the two root folders
     args.basic_data_path   = ensure_abs_path(args.basic_data_path)
@@ -565,6 +577,7 @@ def main():
     args.gauge_outdir      = ensure_abs_path(args.gauge_outdir)
     args.results_outdir    = ensure_abs_path(args.results_outdir)
     args.usgs_script_path  = ensure_abs_path(args.usgs_script_path)
+    args.exp_prefix = (args.exp_prefix or "").strip()
 
     warmup_time_state = args.warmup_time_end
     
@@ -599,7 +612,12 @@ def main():
           f"area_km2={'NA' if info.drainage_area_km2 is None else f'{info.drainage_area_km2:.2f}'}")
 
     # 2) Resolve folders and OBS CSV path
-    control_folder = os.path.join(args.cali_set_dir, f"{site}_{args.cali_tag}_{args.folder_label}")
+    folder_name = f"{site}_{args.cali_tag}_{args.folder_label}"
+    if args.exp_prefix:
+        folder_name = f"{args.exp_prefix}_{folder_name}"
+    control_folder = os.path.join(args.cali_set_dir, folder_name)
+    if args.exp_prefix:
+        print(f"[INFO] Using exp_prefix={args.exp_prefix}")
     obs_csv_path = build_obs_csv_path(args.gauge_outdir, site)
 
     # 3) Clip MRMS to a site-specific subset for faster runs
@@ -696,6 +714,8 @@ def main():
         objective=args.objective,
         physics_information=not args.physics_information_off,
         image_input=not args.image_input_off,
+        image_type=args.image_type,
+        failure_patient=args.failure_patient,
         detail_output=args.detail_output,
     )
     print(f"[INFO] Starting calibration (max_rounds={args.max_rounds}) ...")

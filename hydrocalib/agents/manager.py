@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from ..config import (DEFAULT_GAUGE_NUM, DEFAULT_PEAK_PICK_KWARGS, DEFAULT_SIM_FOLDER,
-                       EVENTS_FOR_AGGREGATE, IMPROVE_PATIENCE, MAX_STEPS_DEFAULT)
+                       EVENTS_FOR_AGGREGATE, MAX_STEPS_DEFAULT)
 from ..history import CandidateRecord, HistoryStore, RoundRecord
 from ..metrics import (aggregate_event_metrics, compute_event_metrics,
                        read_metrics_for_period, read_metrics_from_csv)
@@ -25,9 +25,15 @@ from .physics_info import (
     render_parameter_guide,
 )
 from ..peak_events import pick_peak_events
-from ..plotting import plot_event_windows, plot_hydrograph_with_precipitation
+from ..plotting import (
+    plot_event_windows,
+    plot_flow_duration_curve,
+    plot_hydrograph_with_precipitation,
+    plot_image_montage,
+)
 from ..simulation import SimulationResult, SimulationRunner, run_simulations_parallel
 from .evaluation import EvaluationAgent
+from .image_reader import ImageSummaryAgent
 from .proposal import ProposalAgent
 from .types import RoundContext
 
@@ -41,6 +47,8 @@ class CandidateOutcome:
     aggregate_metrics: Dict[str, float]
     full_metrics: Dict[str, float]
     hydrograph_path: Optional[str] = None
+    fdc_path: Optional[str] = None
+    montage_path: Optional[str] = None
     event_figures: List[str] = field(default_factory=list)
 
 
@@ -70,9 +78,11 @@ class TwoStageCalibrationManager:
                  memory_cutoff: Optional[int] = None,
                  max_workers: Optional[int] = None,
                  test_config: Optional[TestConfig] = None,
-                 objective: str = "nse_event",
+                 objective: str = "nse",
                  physics_information: bool = True,
                  image_input: bool = True,
+                 image_type: str = "fdc",
+                 failure_patient: int = 5,
                  detail_output: bool = False):
         self.args_obj = args_obj
         self.current_params = ParameterSet.from_object(args_obj)
@@ -90,6 +100,7 @@ class TwoStageCalibrationManager:
             display_name_map=self.display_name_map,
             detail_output=detail_output,
         )
+        self.image_reader = ImageSummaryAgent(detail_output=detail_output)
         self.n_candidates = n_candidates
         self.n_peaks = n_peaks
         self.include_max_event_images = include_max_event_images
@@ -99,42 +110,49 @@ class TwoStageCalibrationManager:
         if memory_cutoff is not None and memory_cutoff < 0:
             raise ValueError("memory_cutoff must be non-negative (>= 0)")
         self.memory_cutoff = memory_cutoff
+        if failure_patient < 1:
+            raise ValueError("failure_patient must be at least 1")
         self.best_outcome: Optional[CandidateOutcome] = None
         self.round_index = 0
+        self.round_label = "round000_000"
         self.stall = 0
         self.max_workers = max_workers
         self.test_config = test_config
         self.objective = objective
         self.physics_information = physics_information
         self.image_input = image_input
+        self.image_type = image_type
+        self.failure_patient = failure_patient
         self.detail_output = detail_output
         self.detail_dir = Path(simu_folder) / "results" / "detail_logs"
+        self.update_round = 1
+        self.failure_round = 0
+        self.best_objective_value = float("-inf")
+        self.failure_history: List[Dict[str, Any]] = []
 
     def initialize_baseline(self) -> None:
         print("[Init] Running baseline simulation…")
-        baseline_result = self.runner.run(self.current_params, round_index=0, candidate_index=0)
+        baseline_result = self.runner.run(self.current_params, round_label="round000_000", candidate_index=0)
         outcome = self._process_result(baseline_result)
         self._ensure_plots(outcome)
         self.best_outcome = outcome
-        improved = self.history.update_best(
+        self.best_objective_value = self._objective_value(outcome.aggregate_metrics, outcome.full_metrics)
+        self.history.update_best(
             aggregate_metrics=outcome.aggregate_metrics,
             full_metrics=outcome.full_metrics,
             params=outcome.params.values.copy(),
             round_index=0,
             candidate_index=0,
+            objective_key=self.objective.upper(),
         )
         self._update_metric_bests([outcome], round_index=0)
         self.history.save()
-        agg = outcome.aggregate_metrics
         full = outcome.full_metrics
         print(
             "[Init] Baseline metrics "
-            f"event NSE={agg.get('NSE', float('nan')):.3f} "
-            f"event CC={agg.get('CC', float('nan')):.3f} "
-            f"event KGE={agg.get('KGE', float('nan')):.3f} | "
-            f"full NSE={full.get('NSE', float('nan')):.3f} "
-            f"full CC={full.get('CC', float('nan')):.3f} "
-            f"full KGE={full.get('KGE', float('nan')):.3f}"
+            f"NSE={full.get('NSE', float('nan')):.3f} "
+            f"CC={full.get('CC', float('nan')):.3f} "
+            f"KGE={full.get('KGE', float('nan')):.3f}"
         )
 
     def _process_result(self, result: SimulationResult) -> CandidateOutcome:
@@ -144,11 +162,11 @@ class TwoStageCalibrationManager:
         full_metrics = read_metrics_from_csv(result.csv_path)
         return CandidateOutcome(result, result.params, windows, event_metrics, aggregate, full_metrics)
 
-    def _run_test_suite(self, params: Sequence[ParameterSet], round_index: int) -> Dict[int, Dict[str, Any]]:
+    def _run_test_suite(self, params: Sequence[ParameterSet], round_label: str) -> Dict[int, Dict[str, Any]]:
         if not self.test_config or not self.test_config.enabled:
             return {}
 
-        print(f"[Round {round_index}] Starting test suite for {len(params)} candidates…")
+        print(f"[Round {round_label}] Starting test suite for {len(params)} candidates…")
         overrides = {
             "TIME_STATE": self.test_config.warmup_state,
             "WARMUP_TIME_BEGIN": self.test_config.warmup_begin,
@@ -162,7 +180,7 @@ class TwoStageCalibrationManager:
         for idx, param_set in enumerate(params):
             result = self.runner.run_with_overrides(
                 param_set,
-                round_index=round_index,
+                round_label=round_label,
                 candidate_index=idx,
                 subfolder="test",
                 states_dir=None,
@@ -174,7 +192,7 @@ class TwoStageCalibrationManager:
                 end=self.test_config.eval_end,
             )
             summary = {
-                "round_index": round_index,
+                "round_label": round_label,
                 "candidate_index": idx,
                 "params": param_set.values.copy(),
                 "csv": result.csv_path,
@@ -185,15 +203,15 @@ class TwoStageCalibrationManager:
             summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2))
 
             print(
-                f"    [Round {round_index} Test {idx}] NSE={metrics.get('NSE', float('nan')):.3f} "
+                f"    [Round {round_label} Test {idx}] NSE={metrics.get('NSE', float('nan')):.3f} "
                 f"CC={metrics.get('CC', float('nan')):.3f} KGE={metrics.get('KGE', float('nan')):.3f}"
             )
 
-        print(f"[Round {round_index}] Test suite finished.")
+        print(f"[Round {round_label}] Test suite finished.")
         return summaries
 
-    def _request_candidates(self, context: RoundContext, round_index: int):
-        print(f"[Round {round_index}] Requesting {self.n_candidates} proposals from proposal agent…")
+    def _request_candidates(self, context: RoundContext, round_label: str):
+        print(f"[Round {round_label}] Requesting {self.n_candidates} proposals from proposal agent…")
         proposal_log = None
         proposals_result = self.proposal_agent.propose(
             context, self.n_candidates, return_log=self.detail_output
@@ -203,7 +221,7 @@ class TwoStageCalibrationManager:
         else:
             proposals = proposals_result
         proposal_params = self.proposal_agent.apply_candidates(self.best_outcome.params, proposals)
-        print(f"[Round {round_index}] Initial proposals and parameter sets:")
+        print(f"[Round {round_label}] Initial proposals and parameter sets:")
         for idx, (proposal, params) in enumerate(zip(proposals, proposal_params)):
             goal = proposal.get("goal") or proposal.get("id") or f"cand_{idx}"
             print(
@@ -222,7 +240,7 @@ class TwoStageCalibrationManager:
         if not refined_params:
             refined_candidates = proposals
             refined_params = proposal_params
-        print(f"[Round {round_index}] Evaluation agent refined parameter sets:")
+        print(f"[Round {round_label}] Evaluation agent refined parameter sets:")
         for idx, (candidate, params) in enumerate(zip(refined_candidates, refined_params)):
             goal = candidate.get("goal") or candidate.get("id") or f"cand_{idx}"
             print(
@@ -230,15 +248,19 @@ class TwoStageCalibrationManager:
                 f"→ params={params.values}"
             )
         if proposal_log:
-            self._log_detail("proposal", round_index, proposal_log)
+            self._log_detail("proposal", round_label, proposal_log)
         if eval_log:
-            self._log_detail("evaluation", round_index, eval_log)
+            self._log_detail("evaluation", round_label, eval_log)
         return proposals, refined_candidates, refined_params, eval_meta
 
     def _ensure_plots(self, outcome: CandidateOutcome) -> None:
         hydrograph_missing = not outcome.hydrograph_path or not Path(outcome.hydrograph_path).exists()
         if hydrograph_missing:
             outcome.hydrograph_path = plot_hydrograph_with_precipitation(outcome.simulation.csv_path, show=False)
+
+        fdc_missing = not outcome.fdc_path or not Path(outcome.fdc_path).exists()
+        if fdc_missing:
+            outcome.fdc_path = plot_flow_duration_curve(outcome.simulation.csv_path, show=False)
 
         valid_figures = [fig for fig in outcome.event_figures if Path(fig).exists()]
         if len(valid_figures) < self.include_max_event_images:
@@ -250,6 +272,20 @@ class TwoStageCalibrationManager:
             )[:self.include_max_event_images]
         outcome.event_figures = valid_figures
 
+    def _ensure_montage(self, outcome: CandidateOutcome) -> Optional[str]:
+        image_paths: List[Optional[str]] = [outcome.fdc_path]
+        image_paths.extend(outcome.event_figures[:3])
+        while len(image_paths) < 4:
+            image_paths.append(None)
+        montage_dir = Path(outcome.simulation.output_dir)
+        montage_path = montage_dir / "image_montage.png"
+        outcome.montage_path = plot_image_montage(
+            image_paths,
+            str(montage_path),
+            titles=["FDC", "Event 1", "Event 2", "Event 3"],
+        )
+        return outcome.montage_path
+
     def _publish_best(self,
                       outcome: CandidateOutcome,
                       subfolder: str,
@@ -260,6 +296,10 @@ class TwoStageCalibrationManager:
         best_dir.mkdir(parents=True, exist_ok=True)
         if outcome.hydrograph_path:
             shutil.copy2(outcome.hydrograph_path, best_dir / Path(outcome.hydrograph_path).name)
+        if outcome.fdc_path:
+            shutil.copy2(outcome.fdc_path, best_dir / Path(outcome.fdc_path).name)
+        if outcome.montage_path:
+            shutil.copy2(outcome.montage_path, best_dir / Path(outcome.montage_path).name)
         events_dir = best_dir / "events"
         events_dir.mkdir(exist_ok=True)
         for fig in outcome.event_figures:
@@ -267,7 +307,7 @@ class TwoStageCalibrationManager:
             if fig_path.exists():
                 shutil.copy2(fig_path, events_dir / fig_path.name)
         summary: Dict[str, Any] = {
-            "round_index": outcome.simulation.round_index,
+            "round_index": outcome.simulation.round_label,
             "candidate_index": outcome.simulation.candidate_index,
             "aggregate_metrics": outcome.aggregate_metrics,
             "full_metrics": outcome.full_metrics,
@@ -283,7 +323,7 @@ class TwoStageCalibrationManager:
                            criterion: str,
                            value: float) -> Dict[str, Any]:
         return {
-            "round_index": outcome.simulation.round_index,
+            "round_index": outcome.simulation.round_label,
             "candidate_index": outcome.simulation.candidate_index,
             "criterion": criterion,
             "criterion_value": value,
@@ -291,6 +331,8 @@ class TwoStageCalibrationManager:
             "full_metrics": outcome.full_metrics,
             "params": outcome.params.values.copy(),
             "hydrograph": outcome.hydrograph_path,
+            "flow_duration_curve": outcome.fdc_path,
+            "image_montage": outcome.montage_path,
             "event_figures": outcome.event_figures[: self.include_max_event_images],
         }
 
@@ -323,31 +365,91 @@ class TwoStageCalibrationManager:
             )
         return " | ".join(parts) if parts else "No prior rounds."
 
-    def _build_context(self) -> RoundContext:
+    def _format_round_label(self, update_round: int, failure_round: int) -> str:
+        return f"round{update_round:03d}_{failure_round:03d}"
+
+    def _format_failure_summary(self, max_items: int = 3) -> tuple[str, List[Dict[str, Any]]]:
+        if not self.failure_history:
+            return "", []
+        tail = self.failure_history[-max_items:]
+        summary_lines = []
+        for item in tail:
+            summary_lines.append(
+                f"{item['round_label']}: best objective={item['objective_value']:.3f} "
+                f"(cand {item['candidate_index']})"
+            )
+        summary = "Recent failed attempts: " + " | ".join(summary_lines)
+        return summary, tail
+
+    def _build_image_summary(self, outcome: CandidateOutcome) -> str:
+        if not self.image_input or self.image_type in ("noimage", "noboth"):
+            return ""
+        self._ensure_plots(outcome)
+        montage_path = self._ensure_montage(outcome)
+        if not montage_path:
+            return ""
+        summary, reader_log = self.image_reader.summarize(
+            montage_path,
+            round_label=self.round_label,
+            return_log=self.detail_output,
+        )
+        if reader_log:
+            self._log_detail("image_reader", self.round_label, reader_log)
+        return summary
+
+    def _record_failure(self,
+                        best_outcome: CandidateOutcome,
+                        objective_value: float,
+                        proposals: List[Dict[str, Any]],
+                        refined_candidates: List[Dict[str, Any]]) -> None:
+        candidate_index = best_outcome.simulation.candidate_index
+        refined_candidate = (
+            refined_candidates[candidate_index]
+            if 0 <= candidate_index < len(refined_candidates)
+            else {}
+        )
+        record = {
+            "round_label": self.round_label,
+            "candidate_index": candidate_index,
+            "objective": self.objective,
+            "objective_value": objective_value,
+            "aggregate_metrics": best_outcome.aggregate_metrics,
+            "full_metrics": best_outcome.full_metrics,
+            "best_candidate": refined_candidate,
+            "proposals": proposals,
+        }
+        self.failure_history.append(record)
+
+    def _build_context(self, *, image_summary: str) -> RoundContext:
         assert self.best_outcome is not None
         description = "Top candidate metrics averaged across selected events."
-        images = []
-        if self.image_input:
-            if self.best_outcome.hydrograph_path:
-                images.append(self.best_outcome.hydrograph_path)
-            images.extend(self.best_outcome.event_figures[: self.include_max_event_images])
+        images: List[str] = []
         display_params = display_parameters(self.best_outcome.params.values, self.display_name_map)
         prompt_param_names = (
             self.display_name_map
             if self.physics_information
             else {v: v for v in self.display_name_map.values()}
         )
+        failure_summary, failure_details = self._format_failure_summary()
+        if self.image_type in ("noimage", "noboth"):
+            description = "Event diagnostics withheld for this run."
+            event_metrics = []
+        else:
+            event_metrics = self.best_outcome.event_metrics[: self.n_peaks]
         return RoundContext(
-            round_index=self.round_index,
+            round_index=self.round_label,
             params=self.best_outcome.params.values.copy(),
             display_params=display_params,
             param_display_names=prompt_param_names,
             aggregate_metrics=self.best_outcome.aggregate_metrics,
             full_metrics=self.best_outcome.full_metrics,
-            event_metrics=self.best_outcome.event_metrics[: self.n_peaks],
+            event_metrics=event_metrics,
             history_summary=self._history_summary(),
             description=description,
             images=images,
+            image_summary=image_summary,
+            failure_summary=failure_summary,
+            failure_details=failure_details,
             physics_information=self.physics_information,
             physics_prompt=self.physics_prompt,
         )
@@ -361,17 +463,17 @@ class TwoStageCalibrationManager:
             payload["rounds"] = self._apply_history_limit(rounds)
         return payload
 
-    def _log_detail(self, stage: str, round_index: int, payload: Dict[str, Any]) -> None:
+    def _log_detail(self, stage: str, round_label: str, payload: Dict[str, Any]) -> None:
         if not self.detail_output:
             return
-        out_dir = self.detail_dir / f"round_{round_index:02d}"
+        out_dir = self.detail_dir / round_label
         out_dir.mkdir(parents=True, exist_ok=True)
         target = out_dir / f"{stage}.json"
         target.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
-        print(f"[Detail] Saved {stage} log for round {round_index} to {target}.")
+        print(f"[Detail] Saved {stage} log for round {round_label} to {target}.")
         prompt_text = payload.get("user_prompt")
         if prompt_text:
-            print(f"[Detail] {stage.capitalize()} prompt (round {round_index}):\n{prompt_text}")
+            print(f"[Detail] {stage.capitalize()} prompt (round {round_label}):\n{prompt_text}")
 
     def _candidate_score(self, aggregate: Dict[str, float], full: Dict[str, float]) -> float:
         nse = aggregate.get("NSE", float("nan"))
@@ -396,19 +498,13 @@ class TwoStageCalibrationManager:
         return score
 
     def _objective_value(self, aggregate: Dict[str, float], full: Dict[str, float]) -> float:
-        if self.objective == "score":
-            return self._candidate_score(aggregate, full)
-
-        if self.objective == "nse_full":
-            value = full.get("NSE", float("nan"))
-        else:
-            value = aggregate.get("NSE", float("nan"))
+        metric_key = self.objective.upper()
+        value = full.get(metric_key, float("nan"))
 
         return value if np.isfinite(value) else float("-inf")
 
     def _collect_round_bests(self, outcomes: Sequence[CandidateOutcome]) -> Dict[str, Dict[str, Any]]:
         metric_extractors = {
-            "score": lambda outcome: self._candidate_score(outcome.aggregate_metrics, outcome.full_metrics),
             "objective": lambda outcome: self._objective_value(outcome.aggregate_metrics, outcome.full_metrics),
             "full_nse": lambda outcome: outcome.full_metrics.get("NSE", float("nan")),
             "full_cc": lambda outcome: outcome.full_metrics.get("CC", float("nan")),
@@ -450,46 +546,99 @@ class TwoStageCalibrationManager:
             print(f"[Debug] Writing detailed agent I/O to {self.detail_dir}.")
         if self.best_outcome is None:
             self.initialize_baseline()
-        # Prime the first batch of candidates
-        initial_context = self._build_context()
-        proposals, refined_candidates, refined_params, eval_meta = self._request_candidates(initial_context, 1)
 
-        for r in range(1, max_rounds + 1):
-            self.round_index = r
+        next_proposals = None
+        next_refined = None
+        next_params = None
+        next_eval_meta: Dict[str, Any] = {}
+
+        while self.update_round <= max_rounds:
+            self.round_label = self._format_round_label(self.update_round, self.failure_round)
+            self.round_index = self.update_round
+
+            if next_params is None:
+                image_summary = self._build_image_summary(self.best_outcome)
+                context = self._build_context(image_summary=image_summary)
+                proposals, refined_candidates, refined_params, eval_meta = self._request_candidates(
+                    context, self.round_label
+                )
+            else:
+                proposals = next_proposals or []
+                refined_candidates = next_refined or []
+                refined_params = next_params
+                eval_meta = next_eval_meta
+                next_proposals = None
+                next_refined = None
+                next_params = None
+                next_eval_meta = {}
 
             print(
-                f"[Round {r}] Launching {len(refined_params)} simulations (max_workers={self.max_workers or 'auto'})…"
+                f"[Round {self.round_label}] Launching {len(refined_params)} simulations "
+                f"(max_workers={self.max_workers or 'auto'})…"
             )
             results = run_simulations_parallel(
                 self.runner,
                 refined_params,
-                r,
+                self.round_label,
                 self.max_workers,
             )
             outcomes = [self._process_result(res) for res in results]
 
-            print(f"[Round {r}] Candidate performance summary:")
+            print(f"[Round {self.round_label}] Candidate performance summary:")
             for outcome in outcomes:
                 agg = outcome.aggregate_metrics
                 full = outcome.full_metrics
-                score = self._candidate_score(agg, full)
                 objective_value = self._objective_value(agg, full)
                 print(
                     f"    [Cand {outcome.simulation.candidate_index}] "
-                    f"objective({self.objective})={objective_value:.3f} | score={score:.3f} | "
-                    f"event NSE={agg.get('NSE', float('nan')):.3f} "
-                    f"CC={agg.get('CC', float('nan')):.3f} KGE={agg.get('KGE', float('nan')):.3f} "
-                    f"lag={agg.get('lag_hours', float('nan')):.2f}h | "
-                    f"full NSE={full.get('NSE', float('nan')):.3f} CC={full.get('CC', float('nan')):.3f} "
+                    f"objective({self.objective})={objective_value:.3f} | "
+                    f"full NSE={full.get('NSE', float('nan')):.3f} "
+                    f"CC={full.get('CC', float('nan')):.3f} "
                     f"KGE={full.get('KGE', float('nan')):.3f}"
                 )
 
             best_idx = self._select_best(outcomes)
             best_outcome = outcomes[best_idx]
             self._ensure_plots(best_outcome)
+
+            agg = best_outcome.aggregate_metrics
+            full = best_outcome.full_metrics
+            objective_value = self._objective_value(agg, full)
+            print(
+                f"[Round {self.round_label}] Best candidate {best_outcome.simulation.candidate_index}: "
+                f"objective({self.objective})={objective_value:.3f} | "
+                f"full NSE={full.get('NSE', float('nan')):.3f} "
+                f"full CC={full.get('CC', float('nan')):.3f} "
+                f"full KGE={full.get('KGE', float('nan')):.3f}"
+            )
+
+            if objective_value <= self.best_objective_value:
+                self._record_failure(best_outcome, objective_value, proposals, refined_candidates)
+                self.failure_round += 1
+                print(
+                    f"[Round {self.round_label}] No improvement over best objective "
+                    f"({self.best_objective_value:.3f}). Retrying proposals "
+                    f"(failure {self.failure_round}/{self.failure_patient})."
+                )
+                if self.failure_round >= self.failure_patient:
+                    print(
+                        f"[Round {self.round_label}] Failure limit reached "
+                        f"({self.failure_round}/{self.failure_patient}). Stopping calibration."
+                    )
+                    break
+                image_summary = self._build_image_summary(self.best_outcome)
+                context = self._build_context(image_summary=image_summary)
+                proposals, refined_candidates, refined_params, eval_meta = self._request_candidates(
+                    context, self.round_label
+                )
+                continue
+
             self.best_outcome = best_outcome
+            self.best_objective_value = objective_value
             self.current_params = best_outcome.params.copy()
             self.current_params.to_object(self.args_obj)
+            self.failure_round = 0
+            self.update_round += 1
 
             candidate_records = [
                 CandidateRecord(
@@ -503,7 +652,7 @@ class TwoStageCalibrationManager:
             ]
             round_metric_bests = self._collect_round_bests(outcomes)
             round_record = RoundRecord(
-                round_index=r,
+                round_index=self.round_index,
                 proposals=proposals,
                 refined_candidates=refined_candidates,
                 candidates=candidate_records,
@@ -518,62 +667,36 @@ class TwoStageCalibrationManager:
                 aggregate_metrics=best_outcome.aggregate_metrics,
                 full_metrics=best_outcome.full_metrics,
                 params=best_outcome.params.values.copy(),
-                round_index=r,
+                round_index=self.round_index,
                 candidate_index=best_outcome.simulation.candidate_index,
+                objective_key=self.objective.upper(),
             )
-            self._update_metric_bests(outcomes, round_index=r)
+            self._update_metric_bests(outcomes, round_index=self.round_index)
             self.history.save()
             if improved:
-                print(f"[Round {r}] New global best found (candidate {best_outcome.simulation.candidate_index}).")
+                print(
+                    f"[Round {self.round_label}] New global best found "
+                    f"(candidate {best_outcome.simulation.candidate_index})."
+                )
 
-            agg = best_outcome.aggregate_metrics
-            full = best_outcome.full_metrics
-            objective_value = self._objective_value(agg, full)
-            print(
-                f"[Round {r}] Best candidate {best_outcome.simulation.candidate_index}: "
-                f"objective({self.objective})={objective_value:.3f} | "
-                f"event NSE={agg.get('NSE', float('nan')):.3f} "
-                f"event CC={agg.get('CC', float('nan')):.3f} "
-                f"event KGE={agg.get('KGE', float('nan')):.3f} | "
-                f"full NSE={full.get('NSE', float('nan')):.3f} "
-                f"full CC={full.get('CC', float('nan')):.3f} "
-                f"full KGE={full.get('KGE', float('nan')):.3f}"
-            )
+            if self.test_config and self.test_config.enabled:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    futures = {"test": executor.submit(self._run_test_suite, refined_params, self.round_label)}
+                    if self.update_round <= max_rounds:
+                        image_summary = self._build_image_summary(self.best_outcome)
+                        next_context = self._build_context(image_summary=image_summary)
+                        futures["proposal"] = executor.submit(
+                            self._request_candidates, next_context, self._format_round_label(self.update_round, 0)
+                        )
 
-            # Kick off test and next-round proposal requests in parallel and wait
-            next_proposals = None
-            next_refined = None
-            next_params = None
-            next_eval_meta = {}
-
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                futures = {}
-                if self.test_config and self.test_config.enabled:
-                    futures["test"] = executor.submit(self._run_test_suite, refined_params, r)
-                if r < max_rounds:
-                    next_context = self._build_context()
-                    futures["proposal"] = executor.submit(
-                        self._request_candidates, next_context, r + 1
-                    )
-
-                test_summaries = {}
-                for key, future in futures.items():
-                    if key == "test":
-                        test_summaries = future.result()
-                        print(f"[Round {r}] Test summaries written for {len(test_summaries)} candidates.")
-                    elif key == "proposal":
-                        (next_proposals, next_refined, next_params, next_eval_meta) = future.result()
-
-            if r >= IMPROVE_PATIENCE:
-                break
-
-            if next_params is not None:
-                proposals = next_proposals
-                refined_candidates = next_refined
-                refined_params = next_params
-                eval_meta = next_eval_meta
-            else:
-                break
+                    for key, future in futures.items():
+                        if key == "test":
+                            test_summaries = future.result()
+                            print(
+                                f"[Round {self.round_label}] Test summaries written for {len(test_summaries)} candidates."
+                            )
+                        elif key == "proposal":
+                            (next_proposals, next_refined, next_params, next_eval_meta) = future.result()
 
     def _update_metric_bests(self,
                              outcomes: Sequence[CandidateOutcome],
@@ -581,23 +704,6 @@ class TwoStageCalibrationManager:
         for outcome in outcomes:
             agg = outcome.aggregate_metrics
             full = outcome.full_metrics
-            score = self._candidate_score(agg, full)
-            if self.history.update_best_metric(
-                key="score",
-                value=score,
-                aggregate_metrics=agg,
-                full_metrics=full,
-                params=outcome.params.values.copy(),
-                round_index=round_index,
-                candidate_index=outcome.simulation.candidate_index,
-            ):
-                self._ensure_plots(outcome)
-                self._publish_best(
-                    outcome,
-                    subfolder="best",
-                    metadata={"criterion": "score", "criterion_value": score},
-                )
-
             for metric in ("NSE", "CC", "KGE"):
                 value = full.get(metric, float("nan"))
                 if not np.isfinite(value):
