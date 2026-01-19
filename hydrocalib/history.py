@@ -76,8 +76,8 @@ class HistoryStore:
                     round_index: int,
                     candidate_index: int,
                     objective_key: str = "NSE") -> bool:
-        current_best = self.best_metrics.get("aggregate_metrics", {}).get(objective_key, float("-inf")) if self.best_metrics else float("-inf")
-        candidate_score = aggregate_metrics.get(objective_key, float("-inf"))
+        current_best = self.best_metrics.get("full_metrics", {}).get(objective_key, float("-inf")) if self.best_metrics else float("-inf")
+        candidate_score = full_metrics.get(objective_key, float("-inf"))
         if candidate_score > current_best:
             self.best_metrics = {
                 "round_index": round_index,

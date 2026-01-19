@@ -494,7 +494,7 @@ class TwoStageCalibrationManager:
 
     def _objective_value(self, aggregate: Dict[str, float], full: Dict[str, float]) -> float:
         metric_key = self.objective.upper()
-        value = aggregate.get(metric_key, float("nan"))
+        value = full.get(metric_key, float("nan"))
 
         return value if np.isfinite(value) else float("-inf")
 
