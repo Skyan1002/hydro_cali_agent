@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import base64
 import json
+import ast
+
 import re
 import os
 from pathlib import Path
@@ -90,17 +92,21 @@ def extract_json_block(text: str) -> Dict[str, Any]:
     try:
         return json.loads(match.group(0))
     except json.JSONDecodeError:
-         # If strict regex failed (due to markdown backticks potentially interfering if inside match? 
-         # actually regex is greedy internal so it should capture everything between { })
          pass
-         
-    # Logic to strip ```json if they are caught inside?
-    # Actually the current regex takes outermost braces if greedy? 
-    # re.compile(r"\{[\s\S]*\}", re.M) is greedy.
-    # It grabs from first { to last }.
-    
+
     block = match.group(0)
-    return json.loads(block)
+    try:
+        return json.loads(block)
+    except json.JSONDecodeError:
+        # Last resort: ast.literal_eval for single-quote dictionaries
+        try:
+            val = ast.literal_eval(block)
+            if isinstance(val, (dict, list)):
+                return val
+        except:
+             pass
+        # Raise original error if all failed
+        raise
 
 
 def redact_history_block(prompt_text: str) -> str:
