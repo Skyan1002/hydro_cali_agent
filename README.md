@@ -1,6 +1,8 @@
 # INCA: IntelliCal Agent
 
 > **AI-powered EF5 calibration companion** – automate data prep, candidate generation, EF5 runs, and diagnostics for rapid watershed experimentation.
+## Quick Look for Results:
+https://huggingface.co/spaces/skyan1002/INCA_demo
 
 ## ✨ What you get
 - Reproducible scripts to fetch forcing/observation data (`download_data.sh`, `usgs_gauge_download.py`).
