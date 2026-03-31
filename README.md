@@ -1,4 +1,4 @@
-# hydro_cali_agent
+# INCA: IntelliCal Agent
 
 > **AI-powered EF5 calibration companion** – automate data prep, candidate generation, EF5 runs, and diagnostics for rapid watershed experimentation.
 
