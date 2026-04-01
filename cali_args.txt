@@ -1,3 +1,4 @@
+--site_num=03076500
 --basic_data_path=data_cali/basic_data/basic
 --default_param_dir=data_cali/basic_data/default_param
 --precip_path=data_cali/mrmsGauge_18_19
@@ -9,8 +10,9 @@
 --cali_set_dir=data_cali/cali_set
 --cali_tag=2018
 --time_begin=201801010000
---time_end=201812312300
+--time_end=201806302300
 --time_step=1h
 --n_candidates=8
 --n_peaks=3
 --max_rounds=20
+--memory-cutoff=10

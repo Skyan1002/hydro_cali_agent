@@ -73,7 +73,8 @@ class TwoStageCalibrationManager:
                  objective: str = "nse_event",
                  physics_information: bool = True,
                  image_input: bool = True,
-                 detail_output: bool = False):
+                 detail_output: bool = False,
+                 llm_model: str = "gemini-3-pro"):
         self.args_obj = args_obj
         self.current_params = ParameterSet.from_object(args_obj)
         self.runner = SimulationRunner(simu_folder=simu_folder, gauge_num=gauge_num)
@@ -81,11 +82,13 @@ class TwoStageCalibrationManager:
         self.reverse_display_map = invert_display_map(self.display_name_map)
         self.physics_prompt = render_parameter_guide(physics_information, self.display_name_map)
         self.proposal_agent = ProposalAgent(
+            model=llm_model,
             physics_information=physics_information,
             display_name_map=self.display_name_map,
             detail_output=detail_output,
         )
         self.evaluation_agent = EvaluationAgent(
+            model=llm_model,
             physics_information=physics_information,
             display_name_map=self.display_name_map,
             detail_output=detail_output,

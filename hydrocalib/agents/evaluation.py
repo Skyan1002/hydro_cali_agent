@@ -14,6 +14,7 @@ from .utils import (
     extract_json_block,
     get_client,
     redact_history_block,
+    load_skill,
 )
 from ..config import LLM_MODEL_REASONING
 from ..parameters import ParameterSet
@@ -80,8 +81,15 @@ class EvaluationAgent:
         if context.images:
             content = [{"type": "text", "text": user_prompt}]
             content.extend({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_image(img)}"}} for img in context.images)
+            
+            # Inject Hydrograph Interpreter Skill
+            skill_content = load_skill("hydrograph_interpreter")
+            enhanced_system_prompt = self.system_prompt
+            if skill_content:
+                 enhanced_system_prompt += f"\n\nUse the following protocol strictly to analyze the image:\n\n{skill_content}"
+
             messages = [
-                {"role": "system", "content": self.system_prompt},
+                {"role": "system", "content": enhanced_system_prompt},
                 {"role": "user", "content": content},
             ]
         else:
@@ -89,31 +97,43 @@ class EvaluationAgent:
                 {"role": "system", "content": self.system_prompt},
                 {"role": "user", "content": user_prompt},
             ]
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-        )
-        raw = response.choices[0].message.content
-        data = extract_json_block(raw)
-        refined = data.get("refined_candidates", [])[:k]
-        meta = {
-            "rationale": data.get("rationale", ""),
-            "risk": data.get("risk", ""),
-            "focus": data.get("focus", ""),
-        }
-        log_payload = None
-        if return_log:
-            log_payload = {
-                "stage": "evaluation",
-                "round": context.round_index,
-                "system_prompt": self.system_prompt,
-                "user_prompt": redact_history_block(user_prompt),
-                "input_files": [Path(img).name for img in context.images],
-                "output_text": raw,
-                "parsed_output": data,
-            }
+        max_retries = 3
+        last_error = None
+        
+        for attempt in range(max_retries):
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                )
+                raw = response.choices[0].message.content
+                data = extract_json_block(raw)
+                refined = data.get("refined_candidates", [])[:k]
+                meta = {
+                    "rationale": data.get("rationale", ""),
+                    "risk": data.get("risk", ""),
+                    "focus": data.get("focus", ""),
+                }
+                log_payload = None
+                if return_log:
+                    log_payload = {
+                        "stage": "evaluation",
+                        "round": context.round_index,
+                        "system_prompt": self.system_prompt,
+                        "user_prompt": redact_history_block(user_prompt),
+                        "input_files": [Path(img).name for img in context.images],
+                        "output_text": raw,
+                        "parsed_output": data,
+                    }
 
-        return refined, meta, log_payload
+                return refined, meta, log_payload
+            
+            except Exception as e:
+                last_error = e
+                print(f"[WARN] Evaluation attempt {attempt+1}/{max_retries} failed: {e}")
+        
+        raise RuntimeError(f"Evaluation failed after {max_retries} attempts. Last error: {last_error}")
+
 
     def apply_candidates(self, base_params: ParameterSet, refined: List[Dict[str, Any]]) -> List[ParameterSet]:
         param_sets: List[ParameterSet] = []
