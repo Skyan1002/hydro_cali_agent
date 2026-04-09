@@ -13,4 +13,5 @@
 --time_step=1h
 --n_candidates=8
 --n_peaks=3
---max_rounds=20
+--max_rounds=10
+--failure_patient=10
