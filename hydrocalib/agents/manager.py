@@ -368,7 +368,7 @@ class TwoStageCalibrationManager:
     def _format_round_label(self, update_round: int, failure_round: int) -> str:
         return f"round{update_round:03d}_{failure_round:03d}"
 
-    def _format_failure_summary(self, max_items: int = 3) -> tuple[str, List[Dict[str, Any]]]:
+    def _format_failure_summary(self, max_items: int = 5) -> tuple[str, List[Dict[str, Any]]]:
         if not self.failure_history:
             return "", []
         tail = self.failure_history[-max_items:]
@@ -379,6 +379,19 @@ class TwoStageCalibrationManager:
                 f"(cand {item['candidate_index']})"
             )
         summary = "Recent failed attempts: " + " | ".join(summary_lines)
+
+        # When image_input is off, filter out event-related metrics from failure details
+        if not self.image_input:
+            filtered_tail = []
+            for item in tail:
+                filtered_item = item.copy()
+                if "aggregate_metrics" in filtered_item:
+                    filtered_item["aggregate_metrics"] = self._filter_metrics_for_no_image(filtered_item["aggregate_metrics"])
+                if "full_metrics" in filtered_item:
+                    filtered_item["full_metrics"] = self._filter_metrics_for_no_image(filtered_item["full_metrics"])
+                filtered_tail.append(filtered_item)
+            return summary, filtered_tail
+
         return summary, tail
 
     def _build_image_summary(self, outcome: CandidateOutcome) -> str:
@@ -420,6 +433,11 @@ class TwoStageCalibrationManager:
         }
         self.failure_history.append(record)
 
+    def _filter_metrics_for_no_image(self, metrics: Dict[str, Any]) -> Dict[str, float]:
+        """Remove event-related metrics (peak_ratio, lag_hours, etc.) when image_input is off."""
+        excluded_keys = {"peak_ratio", "lag_hours", "lag_hours_sim_minus_obs", "sim_peak", "obs_peak"}
+        return {k: v for k, v in metrics.items() if k not in excluded_keys}
+
     def _build_context(self, *, image_summary: str) -> RoundContext:
         assert self.best_outcome is not None
         description = "Top candidate metrics averaged across selected events."
@@ -431,18 +449,30 @@ class TwoStageCalibrationManager:
             else {v: v for v in self.display_name_map.values()}
         )
         failure_summary, failure_details = self._format_failure_summary()
-        if self.image_type in ("noimage", "noboth"):
+
+        # When image_input is off, exclude all event-related diagnostics
+        if not self.image_input:
             description = "Event diagnostics withheld for this run."
             event_metrics = []
+            aggregate_metrics = self._filter_metrics_for_no_image(self.best_outcome.aggregate_metrics)
+            full_metrics = self._filter_metrics_for_no_image(self.best_outcome.full_metrics)
+        elif self.image_type in ("noimage", "noboth"):
+            description = "Event diagnostics withheld for this run."
+            event_metrics = []
+            aggregate_metrics = self._filter_metrics_for_no_image(self.best_outcome.aggregate_metrics)
+            full_metrics = self._filter_metrics_for_no_image(self.best_outcome.full_metrics)
         else:
             event_metrics = self.best_outcome.event_metrics[: self.n_peaks]
+            aggregate_metrics = self.best_outcome.aggregate_metrics
+            full_metrics = self.best_outcome.full_metrics
+
         return RoundContext(
             round_index=self.round_label,
             params=self.best_outcome.params.values.copy(),
             display_params=display_params,
             param_display_names=prompt_param_names,
-            aggregate_metrics=self.best_outcome.aggregate_metrics,
-            full_metrics=self.best_outcome.full_metrics,
+            aggregate_metrics=aggregate_metrics,
+            full_metrics=full_metrics,
             event_metrics=event_metrics,
             history_summary=self._history_summary(),
             description=description,
@@ -461,7 +491,62 @@ class TwoStageCalibrationManager:
         rounds = payload.get("rounds")
         if isinstance(rounds, list):
             payload["rounds"] = self._apply_history_limit(rounds)
+
+        # When image_input is off, filter out event-related metrics from history
+        if not self.image_input:
+            payload = self._filter_history_payload(payload)
+
         return payload
+
+    def _filter_history_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Remove event-related metrics from history payload when image_input is off."""
+        filtered = payload.copy()
+
+        # Filter rounds
+        if "rounds" in filtered and isinstance(filtered["rounds"], list):
+            filtered_rounds = []
+            for round_data in filtered["rounds"]:
+                filtered_round = round_data.copy()
+                # Remove event_metrics from each candidate
+                if "candidates" in filtered_round:
+                    filtered_candidates = []
+                    for cand in filtered_round["candidates"]:
+                        filtered_cand = cand.copy()
+                        filtered_cand["event_metrics"] = []
+                        if "metrics" in filtered_cand:
+                            filtered_cand["metrics"] = self._filter_metrics_for_no_image(filtered_cand["metrics"])
+                        if "full_metrics" in filtered_cand:
+                            filtered_cand["full_metrics"] = self._filter_metrics_for_no_image(filtered_cand["full_metrics"])
+                        filtered_candidates.append(filtered_cand)
+                    filtered_round["candidates"] = filtered_candidates
+                # Filter best_candidates_by_metric
+                if "best_candidates_by_metric" in filtered_round:
+                    for key, best_data in filtered_round["best_candidates_by_metric"].items():
+                        if "aggregate_metrics" in best_data:
+                            best_data["aggregate_metrics"] = self._filter_metrics_for_no_image(best_data["aggregate_metrics"])
+                        if "full_metrics" in best_data:
+                            best_data["full_metrics"] = self._filter_metrics_for_no_image(best_data["full_metrics"])
+                filtered_rounds.append(filtered_round)
+            filtered["rounds"] = filtered_rounds
+
+        # Filter best metrics
+        if "best" in filtered and filtered["best"]:
+            if "metrics" in filtered["best"]:
+                filtered["best"]["metrics"] = self._filter_metrics_for_no_image(filtered["best"]["metrics"])
+            if "aggregate_metrics" in filtered["best"]:
+                filtered["best"]["aggregate_metrics"] = self._filter_metrics_for_no_image(filtered["best"]["aggregate_metrics"])
+            if "full_metrics" in filtered["best"]:
+                filtered["best"]["full_metrics"] = self._filter_metrics_for_no_image(filtered["best"]["full_metrics"])
+
+        # Filter best_by_metric
+        if "best_by_metric" in filtered:
+            for key, best_data in filtered["best_by_metric"].items():
+                if "aggregate_metrics" in best_data:
+                    best_data["aggregate_metrics"] = self._filter_metrics_for_no_image(best_data["aggregate_metrics"])
+                if "full_metrics" in best_data:
+                    best_data["full_metrics"] = self._filter_metrics_for_no_image(best_data["full_metrics"])
+
+        return filtered
 
     def _log_detail(self, stage: str, round_label: str, payload: Dict[str, Any]) -> None:
         if not self.detail_output:

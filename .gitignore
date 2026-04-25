@@ -217,3 +217,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# SLURM / Shell scripts
+*.slurm
+*.sh
+
+# Logs directory
+logs/

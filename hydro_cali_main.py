@@ -15,6 +15,7 @@ Key changes:
 """
 
 import argparse
+import fcntl
 import math
 import os
 import re
@@ -298,6 +299,10 @@ def parse_args() -> argparse.Namespace:
     # Folder layout
     p.add_argument("--cali_set_dir", default="./cali_set",
                    help="Base folder to hold <site>_<tag>/control.txt")
+    p.add_argument("--clip_path", default=None,
+                   help=("Optional shared root path for clipped MRMS cache. "
+                         "When set, clipped rasters are stored in <clip_path>/<site_num>/ "
+                         "and reused across experiments for the same site."))
     p.add_argument("--cali_tag", default="2018", help="Suffix tag for the calibration folder name")
     p.add_argument("--folder_label", default=None,
                    help="Extra label appended to the calibration folder; defaults to creation timestamp (YYYYMMDDHHmm)")
@@ -505,6 +510,38 @@ def clip_mrms_dataset(src_dir: str, dst_dir: str, bounds: BoundingBox) -> str:
     return str(dst_path)
 
 
+def _clip_with_lock(src_dir: str, dst_dir: str, bounds: BoundingBox) -> str:
+    """Clip MRMS with a lock file to avoid concurrent duplicate work."""
+    dst_path = Path(dst_dir)
+    ensure_dir(str(dst_path))
+    lock_path = dst_path / ".clip.lock"
+    with open(lock_path, "w", encoding="utf-8") as lock_fh:
+        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+        try:
+            return clip_mrms_dataset(src_dir, dst_dir, bounds)
+        finally:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+
+
+def resolve_precip_path(args: argparse.Namespace,
+                        control_folder: str,
+                        site_no: str,
+                        clip_bounds: Optional[BoundingBox]) -> str:
+    """Resolve precipitation path, optionally using shared station-level cache."""
+    if clip_bounds is None:
+        print("[WARN] Drainage area unknown; skipping MRMS clipping and using original precip path.")
+        return args.precip_path
+
+    if args.clip_path:
+        site_clip_dir = os.path.join(args.clip_path, site_no)
+        print(f"[INFO] clip_path provided, using shared clip cache: {site_clip_dir}")
+        return _clip_with_lock(args.precip_path, site_clip_dir, clip_bounds)
+
+    # Default behavior (backward compatible): keep clips inside each experiment folder.
+    clip_dir = os.path.join(control_folder, "data_mrms_clip")
+    return clip_mrms_dataset(args.precip_path, clip_dir, clip_bounds)
+
+
 def build_obs_csv_path(gauge_outdir: str, site_no: str) -> str:
     """OBS file naming follows your convention: USGS_<id>_1h_UTC.csv"""
     ensure_dir(gauge_outdir)
@@ -577,6 +614,8 @@ def main():
     args.gauge_outdir      = ensure_abs_path(args.gauge_outdir)
     args.results_outdir    = ensure_abs_path(args.results_outdir)
     args.usgs_script_path  = ensure_abs_path(args.usgs_script_path)
+    if args.clip_path:
+        args.clip_path = ensure_abs_path(args.clip_path)
     args.exp_prefix = (args.exp_prefix or "").strip()
 
     warmup_time_state = args.warmup_time_end
@@ -622,11 +661,7 @@ def main():
 
     # 3) Clip MRMS to a site-specific subset for faster runs
     clip_bounds = _compute_precip_bounds(info.latitude, info.longitude, info.drainage_area_km2)
-    if clip_bounds is None:
-        print("[WARN] Drainage area unknown; skipping MRMS clipping and using original precip path.")
-    else:
-        clip_dir = os.path.join(control_folder, "data_mrms_clip")
-        args.precip_path = clip_mrms_dataset(args.precip_path, clip_dir, clip_bounds)
+    args.precip_path = resolve_precip_path(args, control_folder, site, clip_bounds)
 
     # 4) Optionally download the hourly CSV
     if not args.skip_gauge_download:

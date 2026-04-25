@@ -1,6 +1,7 @@
 --basic_data_path=data_cali/basic_data/basic
 --default_param_dir=data_cali/basic_data/default_param
 --precip_path=data_cali/mrmsGauge_18_19
+--clip_path=/scratch/10883/skyan/data/
 --precip_name=GaugeCorr_QPE_01H_00.00_YYYYMMDD-HH0000.grib2.tif
 --pet_path=data_cali/pet
 --pet_name=etYYYYMMDD.tif
@@ -13,5 +14,5 @@
 --time_step=1h
 --n_candidates=8
 --n_peaks=3
---max_rounds=10
---failure_patient=10
+--max_rounds=20
+--failure_patient=5
