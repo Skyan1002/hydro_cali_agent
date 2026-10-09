@@ -6,10 +6,12 @@ from dataclasses import dataclass, field
 from typing import Dict, Iterable
 
 from .config import FROZEN_PARAMETERS, PARAM_BOUNDS
+from .zoned import base_name
 
 
 def safe_clip(name: str, value: float) -> float:
-    lo, hi = PARAM_BOUNDS[name]
+    # zoned names ('wm@V1') share the bounds of their base parameter
+    lo, hi = PARAM_BOUNDS[base_name(name)]
     return max(lo, min(hi, value))
 
 
@@ -34,7 +36,7 @@ class ParameterSet:
     def apply_updates(self, updates: Dict[str, float]) -> "ParameterSet":
         new_vals = self.values.copy()
         for k, v in updates.items():
-            if k not in new_vals or k in FROZEN_PARAMETERS:
+            if k not in new_vals or base_name(k) in FROZEN_PARAMETERS:
                 continue
             new_vals[k] = apply_step_guard(k, new_vals[k], float(v))
         return ParameterSet(new_vals)
@@ -54,7 +56,7 @@ class ParameterSet:
         return self.values[item]
 
     def __setitem__(self, key: str, value: float) -> None:
-        if key in FROZEN_PARAMETERS:
+        if base_name(key) in FROZEN_PARAMETERS:
             return
         self.values[key] = safe_clip(key, float(value))
 

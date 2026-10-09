@@ -15,6 +15,8 @@ Key changes:
 """
 
 import argparse
+import fcntl
+import json
 import math
 import os
 import re
@@ -29,7 +31,6 @@ from typing import Optional, Any, Union, Iterable
 import requests
 import rasterio
 import numpy as np
-from osgeo import gdal
 from rasterio.coords import BoundingBox
 from rasterio.windows import from_bounds
 from tqdm import tqdm
@@ -298,6 +299,10 @@ def parse_args() -> argparse.Namespace:
     # Folder layout
     p.add_argument("--cali_set_dir", default="./cali_set",
                    help="Base folder to hold <site>_<tag>/control.txt")
+    p.add_argument("--clip_path", default=None,
+                   help=("Optional shared root path for clipped MRMS cache. "
+                         "When set, clipped rasters are stored in <clip_path>/<site_num>/ "
+                         "and reused across experiments for the same site."))
     p.add_argument("--cali_tag", default="2018", help="Suffix tag for the calibration folder name")
     p.add_argument("--folder_label", default=None,
                    help="Extra label appended to the calibration folder; defaults to creation timestamp (YYYYMMDDHHmm)")
@@ -369,19 +374,128 @@ def parse_args() -> argparse.Namespace:
     # Calibration manager knobs
     p.add_argument("--n_candidates", type=int, default=8)
     p.add_argument("--n_peaks", type=int, default=3)
-    p.add_argument("--max_rounds", type=int, default=20)
-    p.add_argument("--objective", choices=["nse_event", "nse_full", "score"], default="nse_event",
-                   help="Objective for selecting the best candidate. Default uses aggregated event NSE.")
+    p.add_argument("--max_rounds", type=int, default=10)
+    p.add_argument("--objective", choices=["nse", "kge", "cc", "multisite_nse"], default="nse",
+                   help="Objective for selecting the best candidate based on event aggregate metrics.")
+    p.add_argument("--failure_patient", type=int, default=5,
+                   help="Stop calibration after this many consecutive non-improving rounds.")
+    p.add_argument("--exp_prefix", default="",
+                   help="Optional prefix prepended to the calibration folder name for experiment grouping.")
+    p.add_argument("--model_type", default="",
+                   help="Optional label appended to the calibration folder name for experiment tracking.")
     p.add_argument("--memory-cutoff", dest="memory_cutoff", type=int, default=None,
                    help="Limit history shared with LLM agents to the most recent N rounds to reduce context size.")
+    p.add_argument("--direct_keep_failures", action="store_true", default=False,
+                   help=("With --workflow direct_matched: keep the failure memory (recent rejected "
+                         "attempts) in the single call, so the baseline has the same information as "
+                         "full INCA and only the proposal/verification stage split is removed."))
+    p.add_argument("--anon_guide", action="store_true", default=False,
+                   help=("With --physics_information_off: keep the neutral labels x1..x13 but give "
+                         "the EF5 parameter guide with the labels substituted for the names, so the "
+                         "process semantics are present while the names (and any pretrained "
+                         "association with them) are not."))
+    p.add_argument("--guide_definitions_only", action="store_true", default=False,
+                   help=("Keep the real parameter names and give a guide that only defines each parameter "
+                         "(what it is), with no statement of how it moves the hydrograph or which parameters "
+                         "to adjust for which deficiency (ablation: names and meanings without relations)."))
     p.add_argument("--physics_information_off", action="store_true", default=False,
-                   help="If set, disable physics-aware guidance and anonymize parameter names in prompts.")
+                   help=("Anonymized-parameter arm (R1-MIN-3 / R2-6): every parameter is shown to the LLM "
+                         "under a neutral label x1..x13 (PARAM_BOUNDS order; frozen th/iwu/isu included) "
+                         "and the EF5 physics guide is replaced by a one-line 'no assumed physical "
+                         "meaning' note, so neither the names nor the guide text carry semantics. "
+                         "Updates are mapped back to real names before simulation."))
     p.add_argument("--image_input_off", action="store_true", default=False,
                    help="If set, disable image sharing with the LLM agents.")
+    p.add_argument("--image_type", choices=["fdc", "hydrograph", "noimage", "noboth"], default="fdc",
+                   help=("Image type shared with LLM agents "
+                         "(fdc=flow duration curve, hydrograph=legacy, "
+                         "noimage=disable images, noboth=disable images and event inputs)."))
     p.add_argument("--detail_output", action="store_true", default=False,
                    help="If set, write detailed prompts, inputs, and LLM outputs for each round.")
 
-    return p.parse_args()
+    # --- revision-round experiment arms -----------------------------------
+    p.add_argument("--workflow", choices=["full", "direct", "direct_matched"], default="full",
+                   help=("full=staged INCA (perception -> proposal -> verification, with failure memory); "
+                         "direct=naive single LLM call per round with the proposal prompt only "
+                         "(no diagnostic instructions, no review instructions, no history payload, "
+                         "no failure memory); "
+                         "direct_matched=single LLM call per round whose system prompt concatenates the "
+                         "perception diagnostic instructions + the verification review instructions "
+                         "(incl. the warm-up down-weighting rule) + the proposal contract, and whose user "
+                         "payload includes the same history_payload the verification agent receives — "
+                         "i.e. information-matched to full, differing only in stage split / independent "
+                         "verification / failure memory. One-shot (single call, no loop) is expressed as "
+                         "--workflow direct|direct_matched --max_rounds 1 --failure_patient 1."))
+    p.add_argument("--perception", choices=["image", "numeric", "none"], default="image",
+                   help=("image=vision LLM reads the 2x2 montage; "
+                         "numeric=deterministic hydrologic signatures from the same series "
+                         "(information-matched control); none=no behavioural diagnostics."))
+    p.add_argument("--llm_model", default=None,
+                   help=("Override the LLM. Give the FULL dated snapshot name so runs are reproducible, "
+                         "e.g. gpt-5-2025-08-07, claude-sonnet-4-5-20250929, gemini-2.5-pro; floating "
+                         "aliases such as claude-sonnet-4-5 resolve to whatever snapshot is current."))
+    p.add_argument("--llm_provider", choices=["openai", "anthropic", "google"], default=None,
+                   help="Force a provider; inferred from --llm_model when omitted.")
+    p.add_argument("--thinking_budget", type=int, default=None,
+                   help=("Enable extended thinking for Anthropic models with this budget_tokens "
+                         "(>=1024; e.g. 4096-8192 to match GPT-5 medium reasoning). Default None = off, "
+                         "i.e. requests are unchanged. Ignored for other providers."))
+    p.add_argument("--keep_legacy_failure_requery", action="store_true", default=False,
+                   help=("Reproduce the submitted-version bug: after a non-improving round the loop "
+                         "issued one extra (never simulated) proposal request. Default off = fixed "
+                         "(one request per round). With this flag the extra calls are still made but "
+                         "flagged used=false in usage_ledger and their detail logs get a _2 suffix."))
+    p.add_argument("--site_lon", type=float, default=None,
+                   help="Override gauge longitude; skips the NWIS site query (needed on offline compute nodes).")
+    p.add_argument("--site_lat", type=float, default=None,
+                   help="Override gauge latitude; must be given together with --site_lon.")
+    p.add_argument("--site_area_km2", type=float, default=None,
+                   help="Override drainage area in km2; controls the MRMS clip window.")
+
+    # --- zoned (high-dimensional) calibration ----------------------------------
+    p.add_argument("--zones", type=int, default=0,
+                   help=("k interior virtual gauges; the basin is partitioned into k+1 zones, "
+                         "each carrying its own copy of the 10 free parameters (dim = 10*(k+1)). "
+                         "0 keeps the legacy single-gauge run."))
+    p.add_argument("--delin", default=None,
+                   help="delineate_<gauge>.json with the ranked tributary outlets (required with --zones > 0)")
+    p.add_argument("--base_control", default=None,
+                   help=("Use this control.txt verbatim instead of generating one from the "
+                         "template. Keeps an agent run bit-comparable with optimizer runs "
+                         "started from the same file."))
+    # --- real interior gauges / multi-site objective (mirrors run_optimizer.py) ---------
+    p.add_argument("--real_gauges", default=None,
+                   help=("nested_<gauge>.json from nest_real_gauges.py: interior gauges are real "
+                         "USGS stations with their own records instead of virtual ones"))
+    p.add_argument("--obs_dir", default="data_cali/gauge_18_19",
+                   help="where USGS_<id>_1h_UTC.csv live, for --real_gauges")
+    p.add_argument("--param_zones", type=int, default=None,
+                   help=("how many gauges get their own parameter block, outlet first; the rest "
+                         "are simulated and scored but inherit the downstream block. Vary this, "
+                         "not --zones, to change the dimension at a fixed set of observations."))
+    p.add_argument("--no_zone_wildcard", action="store_true", default=False,
+                   help=("reject '<param>@*' so every update must name a zone: the arm that "
+                         "tests whether the agent works in all 10*(k+1) dimensions"))
+    p.add_argument("--zone_assembly", action="store_true", default=False,
+                   help=("each round, also simulate a candidate assembled zone by zone from "
+                         "whoever fitted that zone's gauge best (incumbent included); costs one "
+                         "extra forward run and competes on equal terms"))
+    p.add_argument("--bounds_hint", action="store_true", default=False,
+                   help=("put the parameter box and the list of values currently sitting on a "
+                         "bound into every prompt -- information any optimizer has for free"))
+    p.add_argument("--resume", action="store_true", default=False,
+                   help=("continue an existing run folder (same --folder_label) from its "
+                         "calibration_history.json; the previous cost ledger is kept as "
+                         "usage_ledger.seg<N>.json and --max_rounds is the new stopping point"))
+
+    args = p.parse_args()
+    if args.zones > 0 and not (args.delin or args.real_gauges):
+        p.error("--zones > 0 needs --delin delineate_<gauge>.json or --real_gauges nested_<gauge>.json")
+    if args.objective == "multisite_nse" and not (args.zones > 0 and args.real_gauges):
+        p.error("--objective multisite_nse needs --zones > 0 and --real_gauges (records at every gauge)")
+    if args.thinking_budget is not None and args.thinking_budget < 1024:
+        p.error("--thinking_budget must be >= 1024 (Anthropic minimum) or omitted")
+    return args
 
 
 def ensure_dir(path: str) -> None:
@@ -422,38 +536,32 @@ def _clip_raster(src_path: Path, dst_path: Path, bounds: BoundingBox) -> None:
     output_path = dst_path
     nodata_val = -9999
 
-    # Open the grib2 file using GDAL for metadata and optional full copy
-    src_ds = gdal.Open(str(src_path))
-    if src_ds is None:
-        raise ValueError(f"Could not open file {src_path}")
+    # rasterio does all the work here; the previous osgeo.gdal.Open() call was a
+    # no-op (opened then immediately discarded) and only added a hard GDAL
+    # dependency that is not present on every cluster environment.
+    with rasterio.open(src_path) as src:
+        window = from_bounds(bounds.left, bounds.bottom, bounds.right, bounds.top, src.transform)
+        clipped_data = src.read(1, window=window)
+        clipped_data = np.where((clipped_data > 1000) | (clipped_data < 0), nodata_val, clipped_data)
+        clipped_data = clipped_data.astype(np.float32)
 
-    try:
-        # Process with basin clipping using rasterio
-        with rasterio.open(src_path) as src:
-            window = from_bounds(bounds.left, bounds.bottom, bounds.right, bounds.top, src.transform)
-            clipped_data = src.read(1, window=window)
-            clipped_data = np.where((clipped_data > 1000) | (clipped_data < 0), nodata_val, clipped_data)
-            clipped_data = clipped_data.astype(np.float32)
+        clipped_transform = rasterio.windows.transform(window, src.transform)
 
-            clipped_transform = rasterio.windows.transform(window, src.transform)
+        new_meta = {
+            "driver": "GTiff",
+            "height": clipped_data.shape[0],
+            "width": clipped_data.shape[1],
+            "count": 1,
+            "dtype": "float32",
+            "crs": src.crs,
+            "transform": clipped_transform,
+            "nodata": nodata_val,
+            "compress": "none",
+        }
 
-            new_meta = {
-                "driver": "GTiff",
-                "height": clipped_data.shape[0],
-                "width": clipped_data.shape[1],
-                "count": 1,
-                "dtype": "float32",
-                "crs": src.crs,
-                "transform": clipped_transform,
-                "nodata": nodata_val,
-                "compress": "none",
-            }
-
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            with rasterio.open(output_path, "w", **new_meta) as dst:
-                dst.write(clipped_data, 1)
-    finally:
-        src_ds = None
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with rasterio.open(output_path, "w", **new_meta) as dst:
+            dst.write(clipped_data, 1)
 
 
 def clip_mrms_dataset(src_dir: str, dst_dir: str, bounds: BoundingBox) -> str:
@@ -493,6 +601,44 @@ def clip_mrms_dataset(src_dir: str, dst_dir: str, bounds: BoundingBox) -> str:
         _clip_raster(tif, dst_file, bounds)
 
     return str(dst_path)
+
+
+def _clip_with_lock(src_dir: str, dst_dir: str, bounds: BoundingBox) -> str:
+    """Clip MRMS with a lock file to avoid concurrent duplicate work."""
+    dst_path = Path(dst_dir)
+    ensure_dir(str(dst_path))
+    lock_path = dst_path / ".clip.lock"
+    with open(lock_path, "w", encoding="utf-8") as lock_fh:
+        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+        try:
+            return clip_mrms_dataset(src_dir, dst_dir, bounds)
+        finally:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+
+
+def resolve_precip_path(args: argparse.Namespace,
+                        control_folder: str,
+                        site_no: str,
+                        clip_bounds: Optional[BoundingBox]) -> str:
+    """Resolve precipitation path, optionally using shared station-level cache."""
+    if clip_bounds is None:
+        print("[WARN] Drainage area unknown; skipping MRMS clipping and using original precip path.")
+        return args.precip_path
+
+    if args.clip_path:
+        site_clip_dir = os.path.join(args.clip_path, site_no)
+        if Path(args.precip_path).resolve() == Path(site_clip_dir).resolve():
+            # --precip_path already *is* the shared clip cache: never run
+            # clip_mrms_dataset with src == dst (a single iterdir race would
+            # unlink the whole shared MRMS set under concurrent jobs).
+            print(f"[INFO] precip_path is the shared clip cache itself ({site_clip_dir}); using it as-is.")
+            return args.precip_path
+        print(f"[INFO] clip_path provided, using shared clip cache: {site_clip_dir}")
+        return _clip_with_lock(args.precip_path, site_clip_dir, clip_bounds)
+
+    # Default behavior (backward compatible): keep clips inside each experiment folder.
+    clip_dir = os.path.join(control_folder, "data_mrms_clip")
+    return clip_mrms_dataset(args.precip_path, clip_dir, clip_bounds)
 
 
 def build_obs_csv_path(gauge_outdir: str, site_no: str) -> str:
@@ -555,6 +701,8 @@ def main():
 
     if not args.folder_label:
         args.folder_label = _current_timestamp_label()
+    if args.model_type:
+        args.folder_label = f"{args.folder_label}_{args.model_type}"
 
     # Resolve fixed filenames from the two root folders
     args.basic_data_path   = ensure_abs_path(args.basic_data_path)
@@ -565,6 +713,9 @@ def main():
     args.gauge_outdir      = ensure_abs_path(args.gauge_outdir)
     args.results_outdir    = ensure_abs_path(args.results_outdir)
     args.usgs_script_path  = ensure_abs_path(args.usgs_script_path)
+    if args.clip_path:
+        args.clip_path = ensure_abs_path(args.clip_path)
+    args.exp_prefix = (args.exp_prefix or "").strip()
 
     warmup_time_state = args.warmup_time_end
     
@@ -592,23 +743,33 @@ def main():
         if not os.path.isfile(pth):
             print(f"[WARN] Expected file not found: {pth}")
 
-    # 1) Fetch lon/lat/area
-    print(f"[INFO] Fetching site info for {site} ...")
-    info = get_usgs_site_info(site)
+    # 1) Fetch lon/lat/area (or take them from the CLI, so compute nodes without
+    #    outbound network can run and so the geometry is pinned for reproducibility)
+    if args.site_lon is not None and args.site_lat is not None:
+        info = UsgsSiteInfo(site_no=site,
+                            longitude=float(args.site_lon),
+                            latitude=float(args.site_lat),
+                            drainage_area_km2=(float(args.site_area_km2)
+                                               if args.site_area_km2 is not None else None))
+        print(f"[INFO] Using site info supplied on the command line for {site} (no NWIS query).")
+    else:
+        print(f"[INFO] Fetching site info for {site} ...")
+        info = get_usgs_site_info(site)
     print(f"[INFO]  lat={info.latitude:.6f}, lon={info.longitude:.6f}, "
           f"area_km2={'NA' if info.drainage_area_km2 is None else f'{info.drainage_area_km2:.2f}'}")
 
     # 2) Resolve folders and OBS CSV path
-    control_folder = os.path.join(args.cali_set_dir, f"{site}_{args.cali_tag}_{args.folder_label}")
+    folder_name = f"{site}_{args.cali_tag}_{args.folder_label}"
+    if args.exp_prefix:
+        folder_name = f"{args.exp_prefix}_{folder_name}"
+    control_folder = os.path.join(args.cali_set_dir, folder_name)
+    if args.exp_prefix:
+        print(f"[INFO] Using exp_prefix={args.exp_prefix}")
     obs_csv_path = build_obs_csv_path(args.gauge_outdir, site)
 
     # 3) Clip MRMS to a site-specific subset for faster runs
     clip_bounds = _compute_precip_bounds(info.latitude, info.longitude, info.drainage_area_km2)
-    if clip_bounds is None:
-        print("[WARN] Drainage area unknown; skipping MRMS clipping and using original precip path.")
-    else:
-        clip_dir = os.path.join(control_folder, "data_mrms_clip")
-        args.precip_path = clip_mrms_dataset(args.precip_path, clip_dir, clip_bounds)
+    args.precip_path = resolve_precip_path(args, control_folder, site, clip_bounds)
 
     # 4) Optionally download the hourly CSV
     if not args.skip_gauge_download:
@@ -660,8 +821,62 @@ def main():
     )
 
     # 6) Write control.txt
+    if args.base_control:
+        control_text = Path(args.base_control).read_text()
+        print(f"[INFO] Using --base_control verbatim: {args.base_control}")
     control_path = write_control_file(control_folder, control_text)
     print(f"[INFO] control.txt written to: {control_path}")
+
+    # 6b) Zoned run: rewrite control.txt as outlet + k virtual gauges, each with a full
+    #     parameter block. The single-gauge original is kept beside it for reference.
+    zone_ids, zone_areas = [], {}
+    all_gauges, gauge_areas_km2 = [], {}
+    if args.zones > 0:
+        from hydrocalib.zoned import build_control
+
+        if not (args.delin or args.real_gauges):
+            raise SystemExit("--zones > 0 needs --delin delineate_<gauge>.json or --real_gauges nested_<gauge>.json")
+        single_path = Path(control_folder) / "control.single.txt"
+        single_path.write_text(control_text)
+        if args.real_gauges:
+            # Real interior gauges with their own records: the zone parameters become
+            # identifiable, and the objective can be the mean over every gauge.
+            nested = json.loads(Path(args.real_gauges).read_text())
+            picks = list(nested["nested"])[:args.zones]
+            obs_dir = Path(args.obs_dir).resolve()
+            for c in picks:
+                obs = obs_dir / f"USGS_{c['site_no']}_1h_UTC.csv"
+                if not obs.exists():
+                    raise SystemExit(f"missing observations for interior gauge {c['site_no']}: {obs}")
+                c["obs"] = str(obs)
+            candidates = picks
+            zone_src = (nested.get("zones") or {}).get(str(args.zones)) or {}
+            gauge_areas_km2 = {c["site_no"]: float(c["area_km2"]) for c in picks}
+            gauge_areas_km2[site] = float(nested.get("outlet_area_km2") or info.drainage_area_km2 or 0.0)
+        else:
+            delin = json.loads(Path(args.delin).read_text())
+            candidates = delin["candidates"]
+            zone_src = (delin.get("zones") or {}).get(str(args.zones)) or {}
+        all_gauges = [site] + [str(c.get("site_no") or f"V{i + 1}") for i, c in enumerate(candidates[:args.zones])]
+        if len(all_gauges) != args.zones + 1:
+            raise SystemExit(f"only {len(all_gauges) - 1} interior gauges available, asked for {args.zones}")
+        n_pz = args.param_zones
+        if n_pz is not None and not 1 <= n_pz <= len(all_gauges):
+            raise SystemExit(f"--param_zones must be between 1 and {len(all_gauges)}")
+        zoned_text, zone_ids = build_control(control_text, candidates, site, args.zones,
+                                             param_zones=(all_gauges[:n_pz] if n_pz else None))
+        Path(control_path).write_text(zoned_text)
+        # zone areas keyed by every gauge in the control; a zone note only lists the
+        # ones carrying a parameter block
+        fracs = zone_src.get("local_area_frac") or []
+        all_areas = {g: 100.0 * f for g, f in zip(all_gauges, fracs)}
+        zone_areas = {z: all_areas[z] for z in zone_ids if z in all_areas}
+        print(f"[zoned] {len(all_gauges)} gauges, {len(zone_ids)} parameter zones {zone_ids} -> "
+              f"dim {10 * len(zone_ids)}; area% {', '.join(f'{z}:{a:.1f}' for z, a in all_areas.items())}")
+        if args.objective == "multisite_nse":
+            zone_areas = all_areas  # the perception blocks are per gauge, not per zone
+    elif args.objective == "multisite_nse":
+        raise SystemExit("--objective multisite_nse needs --zones > 0 with --real_gauges")
 
     # 7) Run calibration
     TwoStageCalibrationManager = try_import_manager()
@@ -685,6 +900,18 @@ def main():
         except Exception as e:
             print(f"[WARN] Could not configure test simulations: {e}")
 
+    if args.anon_guide:
+        if not args.physics_information_off:
+            raise SystemExit("--anon_guide only makes sense together with --physics_information_off")
+        from hydrocalib.agents import physics_info as _pi
+        _pi.set_anon_guide(True)
+    if args.guide_definitions_only:
+        if args.physics_information_off:
+            raise SystemExit("--guide_definitions_only keeps the real names; do not combine it with --physics_information_off")
+        from hydrocalib.agents import physics_info as _pi2
+        _pi2.set_guide_mode("definitions")
+    if args.direct_keep_failures and args.workflow != "direct_matched":
+        raise SystemExit("--direct_keep_failures is defined for --workflow direct_matched")
     calib = TwoStageCalibrationManager(
         args,
         simu_folder=os.path.relpath(control_folder, start=os.getcwd()),
@@ -696,8 +923,29 @@ def main():
         objective=args.objective,
         physics_information=not args.physics_information_off,
         image_input=not args.image_input_off,
+        image_type=args.image_type,
+        failure_patient=args.failure_patient,
         detail_output=args.detail_output,
+        llm_model=args.llm_model,
+        llm_provider=args.llm_provider,
+        workflow=args.workflow,
+        perception=args.perception,
+        thinking_budget=args.thinking_budget,
+        keep_legacy_failure_requery=args.keep_legacy_failure_requery,
+        zone_ids=zone_ids,
+        zone_areas=zone_areas,
+        multisite_gauges=(all_gauges if args.objective == "multisite_nse" else None),
+        gauge_areas_km2=gauge_areas_km2,
+        zone_wildcard=not args.no_zone_wildcard,
+        direct_keep_failures=args.direct_keep_failures,
+        resume=args.resume,
+        bounds_hint=args.bounds_hint,
+        zone_assembly=args.zone_assembly,
     )
+    print(f"[INFO] arm: workflow={args.workflow} perception={args.perception} "
+          f"model={args.llm_model or 'config default'} provider={args.llm_provider or 'inferred'} "
+          f"thinking_budget={args.thinking_budget} "
+          f"legacy_failure_requery={args.keep_legacy_failure_requery}")
     print(f"[INFO] Starting calibration (max_rounds={args.max_rounds}) ...")
     calib.run(max_rounds=args.max_rounds)
     print("[INFO] Calibration finished.")

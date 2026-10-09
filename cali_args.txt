@@ -14,3 +14,4 @@
 --n_candidates=8
 --n_peaks=3
 --max_rounds=20
+--failure_patient=5

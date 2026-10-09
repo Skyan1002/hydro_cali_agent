@@ -10,9 +10,11 @@ requests
 dataretrieval
 rasterio
 tqdm
-gdal==3.4.1
+# gdal is no longer required: the only osgeo call was a no-op; rasterio does the clipping.
 
-# LLM agent tooling
+# LLM agent tooling (multi-provider, for the cross-foundation-model comparison)
 openai
+anthropic
+google-genai
 python-dotenv
 

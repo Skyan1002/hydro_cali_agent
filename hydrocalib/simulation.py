@@ -14,6 +14,7 @@ import pandas as pd
 from .config import DEFAULT_GAUGE_NUM, DEFAULT_SIM_FOLDER
 from .ef5_runner import run_ef5
 from .parameters import ParameterSet
+from .zoned import is_zoned, render_zoned
 
 
 CONTROL_PATTERN = re.compile(r"^(OUTPUT\s*=\s*).*$", re.MULTILINE)
@@ -24,7 +25,7 @@ TASK_BLOCK_PATTERN = lambda task: re.compile(rf"(?s)(\[Task {re.escape(task)}\].
 
 @dataclass
 class SimulationResult:
-    round_index: int
+    round_label: str
     candidate_index: int
     params: ParameterSet
     output_dir: str
@@ -101,9 +102,14 @@ class SimulationRunner:
                         states_dir: Optional[str] = None,
                         scalar_overrides: Optional[Dict[str, str]] = None) -> str:
         content = self._control_template
-        for key, value in params.items():
-            pattern = re.compile(rf"{key}=\s*[0-9.eE+-]+")
-            content = pattern.sub(f"{key}={value}", content)
+        if is_zoned(params.values.keys()):
+            # 'wm@V1' style keys: edit only the gauge=V1 block of the right parameter
+            # set. The legacy global substitution below would rewrite every block.
+            content = render_zoned(content, params.values)
+        else:
+            for key, value in params.items():
+                pattern = re.compile(rf"{key}=\s*[0-9.eE+-]+")
+                content = pattern.sub(f"{key}={value}", content)
         if CONTROL_PATTERN.search(content):
             content = CONTROL_PATTERN.sub(rf"\1{output_dir}/", content)
         else:
@@ -138,11 +144,11 @@ class SimulationRunner:
 
     def _write_control_file(self,
                             content: str,
-                            round_index: int,
+                            round_label: str,
                             candidate_index: int,
                             *,
                             subfolder: Optional[str] = None) -> str:
-        out_dir = self.simu_folder / "controls" / f"cali_{round_index:03d}" / f"cand_{candidate_index:02d}"
+        out_dir = self.simu_folder / "controls" / round_label / f"cand_{candidate_index:02d}"
         if subfolder:
             out_dir = out_dir / subfolder
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -150,51 +156,109 @@ class SimulationRunner:
         control_path.write_text(content)
         return str(control_path.resolve())
 
-    def _output_dir(self, round_index: int, candidate_index: int, *, subfolder: Optional[str] = None) -> str:
-        out_dir = self.simu_folder / "results" / f"cali_{round_index:03d}" / f"cand_{candidate_index:02d}"
+    def _output_dir(self, round_label: str, candidate_index: int, *, subfolder: Optional[str] = None) -> str:
+        out_dir = self.simu_folder / "results" / round_label / f"cand_{candidate_index:02d}"
         if subfolder:
             out_dir = out_dir / subfolder
         out_dir.mkdir(parents=True, exist_ok=True)
         return str(out_dir.resolve())
 
-    def run(self, params: ParameterSet, round_index: int, candidate_index: int) -> SimulationResult:
-        output_dir = self._output_dir(round_index, candidate_index)
-        control_content = self._render_control(params, output_dir)
-        control_file = self._write_control_file(control_content, round_index, candidate_index)
-        log_path = Path(output_dir) / "logs" / "ef5.log"
+    # --- node-local scratch for EF5 outputs ---------------------------------
+    # /blue is a group-shared Lustre quota; each EF5 run writes ~2 MB of state
+    # rasters and logs that nothing downstream reads, versus ~0.6 MB of time
+    # series that everything reads. When INCA_LOCAL_SCRATCH is set (SLURM
+    # scripts point it at the node's local disk), EF5 writes there and only the
+    # csv/results.json are harvested back to the shared results directory.
+    HARVEST = ("ts.*.csv", "results.json")
+
+    def _scratch_dir(self, output_dir: str) -> str:
+        root = os.getenv("INCA_LOCAL_SCRATCH")
+        if not root:
+            return output_dir
+        rel = Path(output_dir).resolve().relative_to(self.simu_folder)
+        local = Path(root) / self.simu_folder.name / rel
+        local.mkdir(parents=True, exist_ok=True)
+        return str(local)
+
+    def _harvest(self, ef5_dir: str, output_dir: str) -> None:
+        if Path(ef5_dir).resolve() == Path(output_dir).resolve():
+            return
+        import shutil
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        for pattern in self.HARVEST:
+            for src in Path(ef5_dir).glob(pattern):
+                shutil.copy2(src, Path(output_dir) / src.name)
+
+    def run(self, params: ParameterSet, round_label: str, candidate_index: int) -> SimulationResult:
+        output_dir = self._output_dir(round_label, candidate_index)
+        ef5_dir = self._scratch_dir(output_dir)
+        control_content = self._render_control(params, ef5_dir)
+        control_file = self._write_control_file(control_content, round_label, candidate_index)
+        log_path = Path(ef5_dir) / "logs" / "ef5.log"
         run_ef5(control_file, self.ef5_executable, cwd=str(self.simu_folder), log_path=str(log_path))
+        self._harvest(ef5_dir, output_dir)
         csv_path = self._locate_csv(output_dir)
         if csv_path is None:
             raise FileNotFoundError(f"Simulation output CSV not found in {output_dir}")
-        return SimulationResult(round_index, candidate_index, params.copy(), output_dir, csv_path)
+        return SimulationResult(round_label, candidate_index, params.copy(), output_dir, csv_path)
 
     def run_with_overrides(self,
                            params: ParameterSet,
-                           round_index: int,
+                           round_label: str,
                            candidate_index: int,
                            *,
                            subfolder: Optional[str] = None,
                            states_dir: Optional[str] = None,
                            scalar_overrides: Optional[Dict[str, str]] = None) -> SimulationResult:
-        output_dir = self._output_dir(round_index, candidate_index, subfolder=subfolder)
+        output_dir = self._output_dir(round_label, candidate_index, subfolder=subfolder)
+        ef5_dir = self._scratch_dir(output_dir)
         control_content = self._render_control(
             params,
-            output_dir,
+            ef5_dir,
             states_dir=states_dir,
             scalar_overrides=scalar_overrides,
         )
         control_file = self._write_control_file(
             control_content,
-            round_index,
+            round_label,
             candidate_index,
             subfolder=subfolder,
         )
-        log_path = Path(output_dir) / "logs" / "ef5.log"
+        log_path = Path(ef5_dir) / "logs" / "ef5.log"
         run_ef5(control_file, self.ef5_executable, cwd=str(self.simu_folder), log_path=str(log_path))
+        self._harvest(ef5_dir, output_dir)
         csv_path = self._locate_csv(output_dir)
         if csv_path is None:
             raise FileNotFoundError(f"Simulation output CSV not found in {output_dir}")
-        return SimulationResult(round_index, candidate_index, params.copy(), output_dir, csv_path)
+        return SimulationResult(round_label, candidate_index, params.copy(), output_dir, csv_path)
+
+    def discard(self, round_label: str, candidate_index: int, *, subfolder: Optional[str] = None) -> None:
+        """Delete one evaluation's outputs, control file and node-local scratch.
+
+        A 2000-evaluation run keeps every evaluation on disk until the job ends, which is
+        pointless -- only the incumbent's series is ever read again -- and it is what makes
+        a run vulnerable to somebody else filling the node's /tmp halfway through. Paths are
+        rebuilt from the same helpers that created them and every removal is confined to
+        ``simu_folder`` (or the configured scratch root), so a wrong label deletes nothing.
+        """
+        import shutil
+
+        rel = Path(round_label) / f"cand_{candidate_index:02d}"
+        if subfolder:
+            rel = rel / subfolder
+        roots = [self.simu_folder / "results" / rel, self.simu_folder / "controls" / rel]
+        scratch_root = os.getenv("INCA_LOCAL_SCRATCH")
+        if scratch_root:
+            roots.append(Path(scratch_root) / self.simu_folder.name / "results" / rel)
+        for path in roots:
+            try:
+                resolved = path.resolve()
+            except OSError:
+                continue
+            if not any(str(resolved).startswith(str(base)) for base in
+                       (self.simu_folder.resolve(), Path(scratch_root).resolve() if scratch_root else self.simu_folder.resolve())):
+                continue
+            shutil.rmtree(resolved, ignore_errors=True)
 
     def _locate_csv(self, output_dir: str) -> Optional[str]:
         expected = Path(output_dir) / f"ts.{self.gauge_num}.crest.csv"
@@ -207,13 +271,13 @@ class SimulationRunner:
 
 def run_simulations_parallel(runner: SimulationRunner,
                              params_list: Sequence[ParameterSet],
-                             round_index: int,
+                             round_label: str,
                              max_workers: Optional[int] = None) -> List[SimulationResult]:
     results: List[SimulationResult] = []
     worker_count = max_workers or min(len(params_list), os.cpu_count() or len(params_list))
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         future_to_idx = {
-            executor.submit(runner.run, params, round_index, idx): idx
+            executor.submit(runner.run, params, round_label, idx): idx
             for idx, params in enumerate(params_list)
         }
         for future in as_completed(future_to_idx):

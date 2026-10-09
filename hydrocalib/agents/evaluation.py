@@ -6,14 +6,16 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .physics_info import render_parameter_guide, translate_updates
+from .physics_info import BOUNDS_RULE, render_parameter_guide, translate_updates
 from .types import RoundContext
 from .utils import (
     b64_image,
+    call_with_validation,
     coerce_updates,
-    extract_json_block,
-    get_client,
+    new_validation_counters,
+    parameter_whitelist,
     redact_history_block,
+    validate_candidates,
 )
 from ..config import LLM_MODEL_REASONING
 from ..parameters import ParameterSet
@@ -36,9 +38,17 @@ class EvaluationAgent:
                  model: str = LLM_MODEL_REASONING,
                  physics_information: bool = True,
                  display_name_map: Optional[Dict[str, str]] = None,
-                 detail_output: bool = False):
+                 detail_output: bool = False,
+                 provider: Optional[str] = None,
+                 thinking_budget: Optional[int] = None,
+                 allow_wildcard: bool = True):
+        self.allow_wildcard = allow_wildcard
         self.model = model
-        self.client = get_client()
+        self.provider = provider
+        self.thinking_budget = thinking_budget
+        self.usage_log: List[Dict[str, Any]] = []
+        self.validation_log: List[Dict[str, Any]] = []
+        self.validation_counters: Dict[str, int] = new_validation_counters()
         self.physics_information = physics_information
         self.display_name_map = display_name_map or {}
         self.reverse_display_map = {v: k for k, v in self.display_name_map.items()}
@@ -61,6 +71,9 @@ class EvaluationAgent:
             "full_metrics": context.full_metrics,
             "event_metrics": context.event_metrics,
             "history_summary": context.history_summary,
+            "image_summary": context.image_summary,
+            "failure_summary": context.failure_summary,
+            "failed_attempts": context.failure_details,
             "history_payload": history_payload,
             "initial_proposals": proposals,
             "requested_candidates": k,
@@ -68,6 +81,10 @@ class EvaluationAgent:
             "parameter_guide": context.physics_prompt,
             "parameter_names": context.param_display_names,
         }
+        if context.parameter_bounds or context.at_bound:
+            payload["parameter_bounds"] = context.parameter_bounds
+            payload["at_bound"] = context.at_bound
+            payload["bounds_rule"] = BOUNDS_RULE
         return json.dumps(payload, ensure_ascii=False, indent=2)
 
     def refine(self,
@@ -75,7 +92,8 @@ class EvaluationAgent:
                proposals: List[Dict[str, Any]],
                history_payload: Dict[str, Any],
                k: int,
-               return_log: bool = False) -> tuple[List[Dict[str, Any]], Dict[str, Any], Optional[Dict[str, Any]]]:
+               return_log: bool = False,
+               log_round: Optional[str] = None) -> tuple[List[Dict[str, Any]], Dict[str, Any], Optional[Dict[str, Any]]]:
         user_prompt = self.build_prompt(context, proposals, history_payload, k)
         if context.images:
             content = [{"type": "text", "text": user_prompt}]
@@ -89,13 +107,21 @@ class EvaluationAgent:
                 {"role": "system", "content": self.system_prompt},
                 {"role": "user", "content": user_prompt},
             ]
-        response = self.client.chat.completions.create(
+        whitelist = parameter_whitelist(self.display_name_map, allow_wildcard=self.allow_wildcard)
+        response, data, refined, usage, attempts = call_with_validation(
+            messages,
             model=self.model,
-            messages=messages,
+            provider=self.provider,
+            thinking_budget=self.thinking_budget,
+            stage="evaluation",
+            round_label=context.round_index,
+            log_round=log_round,
+            parse=lambda d: validate_candidates(d, "refined_candidates", k, whitelist),
+            usage_log=self.usage_log,
+            validation_log=self.validation_log,
+            counters=self.validation_counters,
         )
-        raw = response.choices[0].message.content
-        data = extract_json_block(raw)
-        refined = data.get("refined_candidates", [])[:k]
+        raw = response.text
         meta = {
             "rationale": data.get("rationale", ""),
             "risk": data.get("risk", ""),
@@ -109,8 +135,11 @@ class EvaluationAgent:
                 "system_prompt": self.system_prompt,
                 "user_prompt": redact_history_block(user_prompt),
                 "input_files": [Path(img).name for img in context.images],
+                "input_paths": [str(Path(img).resolve()) for img in context.images],
                 "output_text": raw,
                 "parsed_output": data,
+                "usage": usage,
+                "validation_attempts": attempts,
             }
 
         return refined, meta, log_payload
@@ -119,9 +148,9 @@ class EvaluationAgent:
         param_sets: List[ParameterSet] = []
         for cand in refined:
             updates = translate_updates(cand.get("updates", {}), self.reverse_display_map)
-            new_params = coerce_updates(base_params, updates)
+            new_params = coerce_updates(base_params, updates, stats=self.validation_counters)
             param_sets.append(new_params)
         return param_sets
 
 
-__all__ = ["EvaluationAgent"]
+__all__ = ["EvaluationAgent", "BASE_EVALUATION_SYSTEM_PROMPT"]

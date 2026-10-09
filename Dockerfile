@@ -3,8 +3,8 @@
 FROM ubuntu:22.04
 
 LABEL name="HydroCaliAgent"
-LABEL description="This container runs an image of Vision-based calibration agent for hydrological models."
-LABEL version="0.1"
+LABEL description="INCA (IntelliCal Agent): LLM-guided calibration of the CREST/EF5 hydrologic model."
+LABEL version="2.0"
 LABEL maintainer="Zhi Li <Zhi.Li-2@colorado.edu>"
 
 # Set environment variables to avoid interactive prompts
@@ -31,7 +31,7 @@ RUN apt-get update && apt-get install -y --fix-missing \
 	nano
 
 # Clone and build EF5
-RUN git clone https://github.com/HyDROSLab/EF5.git
+RUN git clone https://github.com/Skyan1002/EF5.git && cd EF5 && git checkout 95dd7032f3fc51df0e600ad5f1061cdadbb1e223
 
 # Configure build environment to handle warnings
 WORKDIR /EF5

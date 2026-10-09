@@ -74,9 +74,10 @@ class HistoryStore:
                     full_metrics: Dict[str, Any],
                     params: Dict[str, float],
                     round_index: int,
-                    candidate_index: int) -> bool:
-        current_best = self.best_metrics.get("aggregate_metrics", {}).get("NSE", float("-inf")) if self.best_metrics else float("-inf")
-        candidate_score = aggregate_metrics.get("NSE", float("-inf"))
+                    candidate_index: int,
+                    objective_key: str = "NSE") -> bool:
+        current_best = self.best_metrics.get("full_metrics", {}).get(objective_key, float("-inf")) if self.best_metrics else float("-inf")
+        candidate_score = full_metrics.get(objective_key, float("-inf"))
         if candidate_score > current_best:
             self.best_metrics = {
                 "round_index": round_index,
@@ -85,6 +86,7 @@ class HistoryStore:
                 "aggregate_metrics": aggregate_metrics,
                 "full_metrics": full_metrics,
                 "params": params,
+                "objective": objective_key,
             }
             return True
         return False
@@ -112,3 +114,42 @@ class HistoryStore:
             }
             return True
         return False
+
+    def load(self) -> bool:
+        """Rebuild the store from calibration_history.json so a run can be resumed.
+
+        Only the fields ``save`` writes are read back; ``timing``/``progress``/
+        ``failures`` are the manager's and it restores them itself. Returns False
+        when there is nothing usable on disk, so the caller can fall back to a
+        fresh baseline instead of half-restoring.
+        """
+        if not self.path.exists():
+            return False
+        try:
+            payload = json.loads(self.path.read_text())
+        except (OSError, ValueError):
+            return False
+        rounds = []
+        for r in payload.get("rounds") or []:
+            cands = [CandidateRecord(candidate_index=int(c.get("candidate_index", 0)),
+                                     params=dict(c.get("params") or {}),
+                                     metrics=dict(c.get("metrics") or {}),
+                                     full_metrics=dict(c.get("full_metrics") or {}),
+                                     event_metrics=list(c.get("event_metrics") or []))
+                     for c in (r.get("candidates") or [])]
+            rounds.append(RoundRecord(round_index=int(r.get("round_index", len(rounds) + 1)),
+                                      proposals=list(r.get("proposals") or []),
+                                      refined_candidates=list(r.get("refined_candidates") or []),
+                                      candidates=cands,
+                                      best_candidate_index=int(r.get("best_candidate_index", 0)),
+                                      rationale=r.get("rationale", ""),
+                                      risk=r.get("risk", ""),
+                                      focus=r.get("focus", ""),
+                                      best_candidates_by_metric=dict(r.get("best_candidates_by_metric") or {})))
+        best = payload.get("best")
+        if not best or not best.get("params"):
+            return False
+        self.rounds = rounds
+        self.best_metrics = best
+        self.best_by_metric = dict(payload.get("best_by_metric") or {})
+        return True

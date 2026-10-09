@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-LLM_MODEL_DEFAULT = "gpt-5"
-LLM_MODEL_REASONING = "gpt-5"
+LLM_MODEL_DEFAULT = "gpt-5-2025-08-07"
+LLM_MODEL_REASONING = "gpt-5-2025-08-07"
 
 # Calibration behaviour
-MAX_STEPS_DEFAULT = 20
+MAX_STEPS_DEFAULT = 10
 IMPROVE_PATIENCE = 100
 EVENTS_FOR_AGGREGATE = 3
 
