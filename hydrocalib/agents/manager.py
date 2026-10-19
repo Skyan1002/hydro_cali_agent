@@ -166,8 +166,10 @@ class TwoStageCalibrationManager:
         self.physics_prompt = render_parameter_guide(physics_information, self.display_name_map, zone_note)
         if workflow not in WORKFLOWS:
             raise ValueError(f"workflow must be one of {WORKFLOWS}")
-        if perception not in ("image", "numeric", "none"):
-            raise ValueError("perception must be 'image', 'numeric' or 'none'")
+        if perception not in ("image", "numeric", "none", "hybrid"):
+            raise ValueError("perception must be 'image', 'numeric', 'none' or 'hybrid'")
+        if perception == "hybrid" and workflow != "full":
+            raise ValueError("perception 'hybrid' is defined for the staged (full) workflow only")
         self.workflow = workflow
         self.perception = perception
         self.thinking_budget = thinking_budget
@@ -195,7 +197,7 @@ class TwoStageCalibrationManager:
         )
         self.image_reader = ImageSummaryAgent(
             detail_output=detail_output, provider=llm_provider,
-            thinking_budget=thinking_budget, **model_kw
+            thinking_budget=thinking_budget, mode=("hybrid" if perception == "hybrid" else "image"), **model_kw
         )
         self.llm_model = llm_model
         self.llm_provider = llm_provider
@@ -507,7 +509,7 @@ class TwoStageCalibrationManager:
         return proposals, refined_candidates, refined_params, eval_meta
 
     def _ensure_plots(self, outcome: CandidateOutcome) -> None:
-        if self.perception != "image":
+        if self.perception not in ("image", "hybrid"):
             # nothing downstream reads the figures in the numeric / none arms; they only
             # cost matplotlib time and disk on every accepted round
             return
@@ -671,6 +673,32 @@ class TwoStageCalibrationManager:
             # Signatures are a deterministic computation, not an LLM stage, so
             # they are still available to Direct without breaking its one-call budget.
             return self._build_numeric_summary(outcome, log_label=log_label)
+        if self.perception == "hybrid":
+            # Arm H1: the numeric signatures (identical to the numeric arm) plus a reading of the same
+            # montage made *with* those signatures in view; both go to the proposal/evaluation agents.
+            report = self._build_numeric_summary(outcome, log_label=log_label)
+            if not self.image_input or self.image_type in ("noimage", "noboth"):
+                return report
+            self._ensure_plots(outcome)
+            montage_path = self._ensure_montage(outcome)
+            if not montage_path:
+                return report
+            try:
+                extra, reader_log = self.image_reader.summarize(
+                    montage_path,
+                    round_label=self.round_label,
+                    return_log=self.detail_output,
+                    log_round=log_label,
+                    signatures=report or None,
+                )
+            except Exception as exc:  # never let the extra reading kill a run; the numbers still go through
+                print(f"[Warn] hybrid image reading failed: {type(exc).__name__}: {exc}")
+                return report
+            if reader_log:
+                self._log_detail("image_reader", log_label or self.round_label, reader_log)
+            return (report + "\n\nADDITIONAL OBSERVATIONS FROM THE HYDROGRAPH AND FLOW-DURATION PLOTS"
+                    " (read with the signatures above; where a plot and a number disagree, the number is exact)\n"
+                    + extra.strip())
         if self.workflow in ("direct", "direct_matched"):
             # The montage is attached directly to the single proposal call instead.
             return ""

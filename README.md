@@ -17,6 +17,7 @@ This repository contains the code used in *Towards a Diagnostic Reasoning Paradi
 | `hydrocalib/signatures.py` | Numerical hydrologic signatures computed from the simulated and observed streamflow. |
 | `hydrocalib/optimizers.py`, `run_optimizer.py` | Calibration baselines on the same EF5 setup: EKI, CMA-ES, Bayesian optimization, SCE-UA, DREAM(ZS) and the rule-based proposer. |
 | `hydrocalib/zoned.py` | Zone-wise (multi-gauge) parameterization for the 50- and 100-parameter experiments. |
+| `tools/multigauge/` | Screening and grid snapping of the nested USGS gauges for the multi-gauge experiments, and the nested-gauge files used for the Raritan River and Alameda Creek. |
 | `hydro_test_2019.py` | Evaluation-period (2019) simulations for INCA and baseline runs. |
 | `download_data.sh`, `usgs_gauge_download.py` | Forcing, parameter-grid and streamflow downloads. |
 | `cali_args.txt` | Argument file with the settings used in the manuscript. |
@@ -72,7 +73,7 @@ Frequently used options:
 
 | Option | Purpose |
 | --- | --- |
-| `--perception image` / `numeric` | Behaviour perception from hydrograph and flow-duration-curve images (default) or from numerical hydrologic signatures computed from the same series. |
+| `--perception image` / `numeric` / `hybrid` | Behaviour perception from hydrograph and flow-duration-curve images (default), from numerical hydrologic signatures computed from the same series, or from both (the signatures plus a reading of the plots made with the signatures in view; staged workflow only). |
 | `--image_input_off`, `--physics_information_off` | Ablations: withhold the diagnostic images (together with the event-level metrics), or replace parameter names by neutral labels and remove the parameter guide. |
 | `--workflow full` / `direct_matched` | Staged INCA workflow (default) or single-call direct prompting with the same information; add `--direct_keep_failures` to keep the failure notes. A one-shot run uses `--max_rounds 1 --failure_patient 1`. |
 | `--llm_model`, `--llm_provider`, `--thinking_budget` | Other foundation models, e.g. `--llm_model claude-sonnet-4-5-20250929 --thinking_budget 6000`. |
@@ -90,6 +91,8 @@ python3 hydro_cali_main.py @cali_args.txt --site_num <outlet id> \
   --objective multisite_nse --no_zone_wildcard --bounds_hint --zone_assembly \
   --perception numeric --memory-cutoff 3 --failure_patient 10
 ```
+
+The nested-gauge file is prepared in two steps: `tools/multigauge/screen_gauges.py` finds and quality-screens the USGS gauges inside the basin, and `tools/multigauge/nest_real_gauges.py` snaps them to the D8 grid and keeps those that drain to the outlet. The files used in the manuscript are `tools/multigauge/nested_01403060.json` (Raritan River, nine interior gauges) and `tools/multigauge/nested_11179000_clean.json` (Alameda Creek, four interior gauges).
 
 `--bounds_hint` tells the agent the parameter bounds and which parameters sit on a bound; `--zone_assembly` adds, in every round, one candidate assembled zone by zone from the best-scoring sources at each zone's own gauge, which is then simulated and competes with the other candidates.
 

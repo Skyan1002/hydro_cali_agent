@@ -426,8 +426,9 @@ def parse_args() -> argparse.Namespace:
                          "i.e. information-matched to full, differing only in stage split / independent "
                          "verification / failure memory. One-shot (single call, no loop) is expressed as "
                          "--workflow direct|direct_matched --max_rounds 1 --failure_patient 1."))
-    p.add_argument("--perception", choices=["image", "numeric", "none"], default="image",
-                   help=("image=vision LLM reads the 2x2 montage; "
+    p.add_argument("--perception", choices=["image", "numeric", "none", "hybrid"], default="image",
+                   help=("hybrid=numeric signatures plus a reading of the plots made with the signatures in view (arm H1, staged workflow only); "
+                         "image=vision LLM reads the 2x2 montage; "
                          "numeric=deterministic hydrologic signatures from the same series "
                          "(information-matched control); none=no behavioural diagnostics."))
     p.add_argument("--llm_model", default=None,
